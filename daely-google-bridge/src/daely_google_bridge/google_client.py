@@ -67,9 +67,15 @@ class GoogleClient:
           mapping.
         - `open_browser=False` because there is no browser on the VM. The user
           opens the printed URL on their local machine.
-        - Bind host is `localhost` by default. Inside Docker, set
-          `BRIDGE_OAUTH_HOST=0.0.0.0` so Docker's port-mapping can route
-          external traffic to the in-container listener.
+        - **redirect_uri host is always `localhost`** — Google's OAuth 2.0
+          policy rejects `0.0.0.0` (and most other hosts) as redirect URI
+          targets, so we have to give Google a known-good value. The
+          server's actual bind address is separate and configurable via the
+          `BRIDGE_OAUTH_HOST` environment variable. Inside Docker, set it
+          to `0.0.0.0` so Docker's port-mapping can route external traffic
+          to the in-container listener; the redirect that comes back is
+          still aimed at `http://localhost:<port>/`, which the SSH tunnel
+          + Docker port mapping resolve to that same listener.
 
         On success a refresh-token-bearing `Credentials` instance is returned.
         Caller is expected to persist it via `persist_credentials()`.
@@ -78,11 +84,14 @@ class GoogleClient:
             str(client_secrets_path),
             scopes=scopes or DEFAULT_SCOPES,
         )
-        bind_host = os.environ.get("BRIDGE_OAUTH_HOST", "localhost")
+        # bind_addr defaults to None (google-auth uses host then), or to whatever
+        # BRIDGE_OAUTH_HOST is set to (typically "0.0.0.0" inside Docker).
+        bind_addr = os.environ.get("BRIDGE_OAUTH_HOST") or None
         # `{url}` is escaped via doubled braces — google-auth-oauthlib
         # substitutes it at runtime; the f-string only fills in the port.
         creds = flow.run_local_server(
-            host=bind_host,
+            host="localhost",
+            bind_addr=bind_addr,
             port=port,
             open_browser=False,
             authorization_prompt_message=(

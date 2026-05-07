@@ -22,12 +22,34 @@ def test_authorize_default_port_is_8080(MockFlow, tmp_path, monkeypatch):
     MockFlow.from_client_secrets_file.assert_called_once()
     flow_instance.run_local_server.assert_called_once()
     kwargs = flow_instance.run_local_server.call_args.kwargs
+    # redirect_uri host: always localhost (Google policy)
     assert kwargs["host"] == "localhost"
+    # bind_addr: None when BRIDGE_OAUTH_HOST unset → google-auth falls back to host
+    assert kwargs["bind_addr"] is None
     assert kwargs["port"] == 8080
     assert kwargs["open_browser"] is False
     assert "SSH-Tunnel" in kwargs["authorization_prompt_message"]
     assert "ssh -L 8080:localhost:8080" in kwargs["authorization_prompt_message"]
     assert "{url}" in kwargs["authorization_prompt_message"]
+
+
+@patch("daely_google_bridge.google_client.InstalledAppFlow")
+def test_authorize_in_docker_separates_bind_addr_from_redirect_host(
+    MockFlow, tmp_path, monkeypatch,
+):
+    """In Docker, BRIDGE_OAUTH_HOST=0.0.0.0 binds the listener on all interfaces,
+    but the redirect_uri host stays localhost so Google doesn't reject the URI."""
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    monkeypatch.setenv("BRIDGE_OAUTH_HOST", "0.0.0.0")
+    flow_instance = MagicMock()
+    MockFlow.from_client_secrets_file.return_value = flow_instance
+
+    GoogleClient.authorize_via_local_server(secrets)
+
+    kwargs = flow_instance.run_local_server.call_args.kwargs
+    assert kwargs["host"] == "localhost"      # for the redirect_uri
+    assert kwargs["bind_addr"] == "0.0.0.0"   # for the actual TCP bind
 
 
 @patch("daely_google_bridge.google_client.InstalledAppFlow")
@@ -43,6 +65,8 @@ def test_authorize_custom_port_is_forwarded(MockFlow, tmp_path, monkeypatch):
 
     kwargs = flow_instance.run_local_server.call_args.kwargs
     assert kwargs["port"] == 8765
+    # host stays localhost regardless of port
+    assert kwargs["host"] == "localhost"
     # Prompt text references the same custom port (so SSH-tunnel hint stays accurate)
     assert "ssh -L 8765:localhost:8765" in kwargs["authorization_prompt_message"]
     assert "ssh -L 8080:localhost:8080" not in kwargs["authorization_prompt_message"]
@@ -52,7 +76,8 @@ def test_authorize_custom_port_is_forwarded(MockFlow, tmp_path, monkeypatch):
 
 @patch("daely_google_bridge.google_client.InstalledAppFlow")
 def test_authorize_host_overridable_via_env(MockFlow, tmp_path, monkeypatch):
-    """Docker requires bind to 0.0.0.0; we expose this via BRIDGE_OAUTH_HOST."""
+    """BRIDGE_OAUTH_HOST controls the LISTENER bind, not the redirect_uri host.
+    Google requires localhost in the redirect_uri; we always set host=localhost."""
     secrets = tmp_path / "client.json"
     secrets.write_text("{}")
     monkeypatch.setenv("BRIDGE_OAUTH_HOST", "0.0.0.0")
@@ -61,7 +86,8 @@ def test_authorize_host_overridable_via_env(MockFlow, tmp_path, monkeypatch):
 
     GoogleClient.authorize_via_local_server(secrets)
     kwargs = flow_instance.run_local_server.call_args.kwargs
-    assert kwargs["host"] == "0.0.0.0"
+    assert kwargs["host"] == "localhost"       # for the redirect_uri (Google policy)
+    assert kwargs["bind_addr"] == "0.0.0.0"    # for the actual listener
     assert kwargs["port"] == 8080
 
 
