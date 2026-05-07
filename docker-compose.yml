@@ -1,0 +1,62 @@
+# daely-google-bridge — deploy compose
+#
+# Standalone use (no `git clone` needed):
+#
+#     mkdir bridge && cd bridge
+#     curl -O https://raw.githubusercontent.com/twobeass/daely-google-bridge/main/docker-compose.yml
+#     curl -o config.yaml https://raw.githubusercontent.com/twobeass/daely-google-bridge/main/config.docker.example.yaml
+#     mkdir -p data secrets
+#     sudo chown -R 1100:1100 data && chmod 700 secrets
+#     # edit config.yaml, drop google_oauth_client.json into secrets/, then:
+#     docker compose run --rm --service-ports bootstrap
+#     docker compose up -d
+#
+# Override BRIDGE_IMAGE if you want a self-built image instead.
+
+services:
+  bridge:
+    image: ${BRIDGE_IMAGE:-ghcr.io/twobeass/daely-google-bridge:latest}
+    container_name: daely-google-bridge
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+    command: ["run"]
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "bridge"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  # One-shot bootstrap helper. Run with:
+  #   docker compose run --rm --service-ports bootstrap
+  bootstrap:
+    image: ${BRIDGE_IMAGE:-ghcr.io/twobeass/daely-google-bridge:latest}
+    profiles: ["bootstrap"]
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+      - ./config.yaml:/app/config.yaml
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - BRIDGE_OAUTH_HOST=0.0.0.0
+    ports:
+      - "8080:8080"
+    stdin_open: true
+    tty: true
+    command: ["bootstrap"]
+
+  # Convenience: `docker compose --profile ops run --rm status`
+  status:
+    image: ${BRIDGE_IMAGE:-ghcr.io/twobeass/daely-google-bridge:latest}
+    profiles: ["ops"]
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+    command: ["status"]

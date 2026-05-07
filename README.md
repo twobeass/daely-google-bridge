@@ -62,25 +62,26 @@ App, nicht dieser Bridge.)
 
 ## Schnellstart
 
-Auf dem Host, der die Bridge laufen lassen soll:
+Auf dem Host, der die Bridge laufen lassen soll — **kein `git clone` nötig**,
+nur zwei Files vom Repo runterladen:
 
 ```bash
-# 1. Projekt klonen
-git clone https://github.com/twobeass/daely-google-bridge.git
-cd daely-google-bridge/daely-google-bridge
+# 1. Deploy-Ordner anlegen + Files holen
+mkdir bridge && cd bridge
+curl -O https://raw.githubusercontent.com/twobeass/daely-google-bridge/main/docker-compose.yml
+curl -o config.yaml https://raw.githubusercontent.com/twobeass/daely-google-bridge/main/config.docker.example.yaml
 
-# 2. Verzeichnisse vorbereiten
+# 2. Verzeichnisse für State + Secrets
 mkdir -p data secrets
 sudo chown -R 1100:1100 data           # Container läuft als uid 1100
 chmod 700 secrets
 
-# 3. Konfig + OAuth-Secrets reinkopieren
-cp config.docker.example.yaml config.yaml
+# 3. Konfig editieren + OAuth-Secrets reinkopieren
 ${EDITOR:-vi} config.yaml              # daely_email setzen, Rest kann bleiben
 cp /pfad/zu/google_oauth_client.json secrets/
 chmod 600 secrets/google_oauth_client.json
 
-# 4. Image holen (vorgebaut, kein lokaler Build nötig)
+# 4. Image ziehen (vorgebaut auf ghcr.io, multi-arch amd64+arm64)
 docker compose pull
 ```
 
@@ -150,6 +151,8 @@ Die Bridge macht einen initialen Full-Sync und re-syncen dann alle
 
 ## Update auf eine neue Version
 
+Im Deploy-Ordner:
+
 ```bash
 docker compose pull
 docker compose up -d
@@ -158,6 +161,31 @@ docker compose up -d
 Die Bridge holt sich das neueste Image aus
 [GitHub Container Registry](https://github.com/twobeass/daely-google-bridge/pkgs/container/daely-google-bridge),
 deine `data/`- und `secrets/`-Verzeichnisse bleiben unangetastet.
+
+Falls sich die `docker-compose.yml` mal ändern sollte (selten), einmal:
+
+```bash
+curl -O https://raw.githubusercontent.com/twobeass/daely-google-bridge/main/docker-compose.yml
+docker compose up -d
+```
+
+## Selbst aus dem Source bauen (nur für Contributors)
+
+Wer die Bridge selbst weiterentwickeln will:
+
+```bash
+git clone https://github.com/twobeass/daely-google-bridge.git
+cd daely-google-bridge
+
+# Image lokal bauen
+docker build -t local/daely-google-bridge:dev daely-google-bridge/
+
+# Im Deploy-Ordner stattdessen das lokale Image nutzen:
+BRIDGE_IMAGE=local/daely-google-bridge:dev docker compose up -d
+```
+
+Die Test-Suite (`pytest -q` aus `daely-google-bridge/`) läuft komplett
+offline — Daely und Google sind durchgehend gemockt.
 
 ## Repo-Struktur
 
