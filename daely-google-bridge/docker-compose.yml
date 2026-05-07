@@ -9,10 +9,17 @@
 #   ./secrets/   ← google_oauth_client.json (RO)
 #   ./config.yaml ← edited by you; populated by bootstrap
 
+# The image is published to GitHub Container Registry by .github/workflows/docker.yml.
+# Override BRIDGE_IMAGE locally if you want to run a self-built image instead.
+x-bridge-image: &bridge-image
+  image: ${BRIDGE_IMAGE:-ghcr.io/twobeass/daely-google-bridge:latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
 services:
   bridge:
-    build: .
-    image: daely-google-bridge:0.1
+    <<: *bridge-image
     container_name: daely-google-bridge
     restart: unless-stopped
     volumes:
@@ -35,8 +42,7 @@ services:
   # The --service-ports flag exposes the OAuth callback port (8080) only for
   # this run, so SSH-tunnelled browsers can complete the consent flow.
   bootstrap:
-    build: .
-    image: daely-google-bridge:0.1
+    <<: *bridge-image
     profiles: ["bootstrap"]   # only invoked explicitly
     volumes:
       - ./data:/data
@@ -53,7 +59,7 @@ services:
 
   # Convenience: `docker compose run --rm status`
   status:
-    image: daely-google-bridge:0.1
+    <<: *bridge-image
     profiles: ["ops"]
     volumes:
       - ./data:/data

@@ -1,223 +1,249 @@
 # daely-google-bridge
 
-> One-way sync from a [Dæly® Calendar](https://daely-shop.com) family setup to
-> Google Calendar — so events you create on the wall-mounted Daely tablet show
-> up in the same calendar app you already use everywhere else.
+> Spiegelt deinen [Dæly® Calendar](https://daely-shop.com) nach Google
+> Calendar — damit Termine, die du auf dem Tablet eingibst, in jedem
+> Google-Calendar-Widget, in Home Assistant und überall sonst auftauchen,
+> wo du Google Calendar bereits nutzt.
 
 ```
    ┌──────────────────┐                     ┌──────────────────┐
-   │  Dæly Calendar   │   read-only sync    │ Google Calendar  │
-   │  (family tablet) │   ──────────────►   │ (per profile)    │
-   └──────────────────┘                     └──────────────────┘
-       source of truth                       what you check
-                                             on the go
+   │  Dæly Calendar   │   one-way sync      │ Google Calendar  │
+   │  (Familientablet)│   ──────────────►   │ (eigener         │
+   └──────────────────┘                     │  Sub-Kalender)   │
+       Source of Truth                      └──────────────────┘
+                                              ↓        ↓        ↓
+                                            Widget  HomeAssist  Phone
 ```
 
-The bridge runs as a small Docker container, polls Daely's API on an interval,
-maps each event to Google Calendar — including a profile-name footer
-(„👥 Beteiligt: Anna, Bob") so you can tell at a glance who's involved.
+Die Bridge läuft als kleiner Docker-Container, fragt Daelys API in
+konfigurierbarem Intervall ab und schreibt jedes Event in einen Google
+Sub-Kalender — inklusive Profil-Footer („👥 Beteiligt: Anna, Bob") damit du
+auf einen Blick siehst, wer mitgemeint ist.
 
-## Why
+## Warum gibt's das?
 
-We bought a Dæly Calendar for the kitchen. It's a great wall device — a 15.6"
-touch screen that shows the whole family's schedule in one glance — and the
-companion app is fine for adding events on the go. But it has two friction
-points for people who already live in Google Calendar:
+Wir haben ein Dæly Calendar in der Küche hängen — ein 15,6"-Touchscreen, der
+den Kalender der ganzen Familie an einem Ort zeigt. Großartiges Wandgerät,
+solide Companion-App. Was uns aber gefehlt hat:
 
-1. **One-way visibility.** The Daely tablet shows what's on it, but events
-   added there don't surface in our regular Google Calendar app. Checking
-   "what's coming up this week" then needs two phones.
-2. **Sub-calendar layout.** Daely thinks in profiles per family member, while
-   Google Calendar lets us share, colour-code, and route per-person calendars.
-   The natural mapping is one Google sub-calendar per Daely profile.
+1. **Google-Calendar-Widgets**. Mein Tag fängt mit einem Blick aufs
+   Smartphone-Widget an. Die Termine vom Daely-Tablet tauchen da nicht auf,
+   weil Daely seinen eigenen Backend-Speicher hat.
+2. **Home-Assistant-Integration**. HA hat eine fertige Google-Calendar-
+   Integration, mit der man Automationen an Termine hängen kann
+   („wenn morgen Schwimmunterricht ist, leg den Schwimmrucksack-Reminder
+   um 7:30 in die Sprechblase"). Ohne Daely → Google geht das nicht.
+3. **Bestehende Workflows**. Mein Smartphone, mein Auto-Display, mein
+   Google-Account-Setup mit anderen Familienmitgliedern — alles spricht
+   bereits Google Calendar.
 
-This bridge does exactly one thing: every event on a Daely *internal*
-calendar is mirrored into a Google sub-calendar (one per profile, plus a
-"Family" fallback). It's deliberately **one-way only** — Google Calendar
-shouldn't change Daely; Daely is the source of truth. (If you want the other
-direction, Daely already supports CalDAV/Google subscriptions natively;
-this project doesn't try to replace that.)
+Diese Bridge erledigt genau eine Sache: jedes Event aus deinem **gemeinsamen
+Daely-Familienkalender** wird in einen **dedizierten Google-Sub-Kalender**
+gespiegelt (per Default „Daely – Family"). Der Sub-Kalender ist dann ganz
+normal in Widgets, Home Assistant, Outlook-Sync etc. eingebettet.
 
-## What you need
+Die Synchronisation ist **bewusst nur einseitig**: Daely → Google. Daely
+bleibt die Source of Truth. (Den umgekehrten Weg deckt Daely selbst über
+seine eingebaute Google-/CalDAV-Integration ab — ist Sache der offiziellen
+App, nicht dieser Bridge.)
 
-- A Dæly Calendar account (email + password, no MFA — see *Limitations* below)
-- A [Google Cloud project](https://console.cloud.google.com/) with the
-  Calendar API enabled and an OAuth 2.0 *Desktop application* client. Download
-  the `client_secret_*.json` and rename it to `google_oauth_client.json`.
-- A Linux host with Docker (a small VPS, a Raspberry Pi, an old laptop, a NAS
-  that supports Docker — anything works). Running 24/7 makes most sense.
-- An SSH client on your local machine that supports port forwarding (every
-  default `ssh` does).
+## Was du brauchst
 
-That's it.
+- Ein **Dæly-Account** (Email + Passwort, **kein MFA** — siehe
+  *Einschränkungen* unten).
+- Ein **Google-Cloud-Projekt** mit aktivierter Calendar API und einem
+  OAuth-2.0-*Desktop-Client*. Lade die `client_secret_*.json` herunter und
+  benenne sie in `google_oauth_client.json` um.
+- Einen **Linux-Host mit Docker**: VPS, Raspberry Pi, alter Laptop, NAS mit
+  Container-Support — alles geht. 24/7-Betrieb empfohlen, sonst verpasst die
+  Bridge zwischenzeitliche Daely-Änderungen.
+- Einen **SSH-Client** auf deinem lokalen Rechner (für Port-Forwarding beim
+  einmaligen Bootstrap).
 
-## Quick start (Docker)
+## Schnellstart
 
-On the host that will run the bridge:
+Auf dem Host, der die Bridge laufen lassen soll:
 
 ```bash
-# 1. Get the code
+# 1. Projekt klonen
 git clone https://github.com/twobeass/daely-google-bridge.git
 cd daely-google-bridge/daely-google-bridge
 
-# 2. Layout
+# 2. Verzeichnisse vorbereiten
 mkdir -p data secrets
-sudo chown -R 1100:1100 data            # container's bridge user is uid 1100
+sudo chown -R 1100:1100 data           # Container läuft als uid 1100
 chmod 700 secrets
 
+# 3. Konfig + OAuth-Secrets reinkopieren
 cp config.docker.example.yaml config.yaml
-${EDITOR:-vi} config.yaml                # set daely_email; rest can stay default
-
-# 3. Drop the OAuth client JSON next to the bridge
-cp /path/to/google_oauth_client.json secrets/
+${EDITOR:-vi} config.yaml              # daely_email setzen, Rest kann bleiben
+cp /pfad/zu/google_oauth_client.json secrets/
 chmod 600 secrets/google_oauth_client.json
 
-# 4. Build the image
-docker compose build
+# 4. Image holen (vorgebaut, kein lokaler Build nötig)
+docker compose pull
 ```
 
-Now the **one-time bootstrap**, with a port forward back to your laptop so
-the OAuth consent redirect can complete:
+Dann das **einmalige Bootstrap** — vorher in einem zweiten Terminal von
+deinem lokalen Rechner aus den SSH-Tunnel öffnen, damit der OAuth-Redirect
+durchkommt:
 
 ```bash
-# from your local machine, in a separate terminal:
+# auf deinem lokalen Rechner, separates Terminal:
 ssh -L 8080:localhost:8080 user@docker-host
 ```
 
-Then on the host:
+Auf dem Host:
 
 ```bash
 docker compose run --rm --service-ports bootstrap
 ```
 
-The script will:
-1. Ask for your Daely password (no echo).
-2. Print a Google consent URL — open it in your **local** browser.
-3. After you approve, the redirect lands on `localhost:8080` → through the SSH
-   tunnel → into the container → done.
-4. Create one Google sub-calendar per Daely profile + a `Daely – Family`
-   fallback.
-5. Persist refresh tokens in `data/bridge.db` and write the
-   profile→calendar mapping into `config.yaml` (with a `.bak` backup).
+Das Skript:
 
-After bootstrap, **start the long-running sync**:
+1. Fragt dein Daely-Passwort ab (kein Echo).
+2. Druckt eine Google-Consent-URL — die öffnest du **lokal im Browser**.
+3. Nach deiner Zustimmung läuft der Redirect auf `localhost:8080` → durch
+   den SSH-Tunnel → in den Container → fertig.
+4. Legt einen Google-Sub-Kalender `Daely – Family` an, in den die Bridge
+   ab jetzt schreibt.
+5. Persistiert die Refresh-Tokens in `data/bridge.db` und schreibt die
+   Calendar-ID in `config.yaml` (mit `.bak`-Backup).
+
+Anschließend den **Daemon starten**:
 
 ```bash
 docker compose up -d
 docker compose logs -f bridge | jq -R 'fromjson? // .'
 ```
 
-That's the whole setup. The bridge does an initial full sync, then re-syncs
-every 15 minutes (configurable in `config.yaml`).
+Die Bridge macht einen initialen Full-Sync und re-syncen dann alle
+15 Minuten (in `config.yaml` einstellbar).
 
-## What the bridge does and doesn't do
+## Was die Bridge tut — und was nicht
 
-✅ Reads internal Daely calendars (`calendarType=0`) and forwards every event
-   to Google Calendar.\
-✅ Routes events to per-profile Google sub-calendars based on the profile
-   mapping bootstrap creates.\
-✅ Server-expanded recurring events get deduplicated to a master event with the
-   original `RRULE` so Google handles expansion.\
-✅ Resolves profile UUIDs into a friendly *„👥 Beteiligt: …"* footer in the
-   event description.\
-✅ Detects deletions (events removed in Daely disappear from Google on the
-   next full sync).\
-✅ Idempotent: every sync converges; runs are safe to repeat.
+✅ Liest den **gemeinsamen Daely-Familienkalender** (alle Events, an denen
+   ein oder mehrere Profile teilnehmen) und spiegelt jedes Event nach
+   Google.\
+✅ Server-seitig expandierte Recurring-Events werden **dedupliziert**: nur
+   das Master-Event mit der ursprünglichen `RRULE` landet bei Google,
+   Google expandiert dann selbst.\
+✅ Profil-UUIDs in `additionalParticipants` werden in Klartext-Namen
+   aufgelöst und als **„👥 Beteiligt: …"-Footer** an die Description
+   gehängt — damit du im Widget direkt siehst, wer der Termin betrifft.\
+✅ Externe Daely-Kalender (Google/Apple/Microsoft, die schon via Daelys
+   eigene Integration laufen) werden **übersprungen**, damit keine
+   Sync-Loops entstehen.\
+✅ **Löschungen** werden propagiert: was in Daely weg ist, fliegt beim
+   nächsten Full-Sync auch aus Google raus.\
+✅ Idempotent — jeder Sync konvergiert; Wiederholungen sind unkritisch.
 
-❌ **Does not** push Google changes back to Daely. If you need that, use Daely's
-   built-in CalDAV/Google integration in the official app — the bridge stays
-   out of the way.\
-❌ **Does not** sync photos. Daely's 15-image limit is a separate problem;
-   tackling it would require image uploads against the Daely API and is out
-   of scope here.\
-❌ **Does not** support MFA-protected Daely accounts. The login uses ROPC
-   (Resource Owner Password Credentials), which Keycloak rejects when MFA is
-   enabled. Workaround if you want both: keep MFA off for the technical
-   account that owns the bridge and use a different account for day-to-day
-   tablet use, or wait for a future device-flow implementation.
+❌ **Keine Rückrichtung**: Änderungen im Google-Sub-Kalender werden beim
+   nächsten Sync überschrieben. Wenn du Events aus Google nach Daely
+   bringen willst, ist das Daelys eingebaute Google-/CalDAV-Integration
+   in der offiziellen App.\
+❌ **Keine Photo-Sync**. Daelys 15-Bilder-Limit ist ein eigenes Thema und
+   nicht Teil dieser Bridge.\
+❌ **Kein MFA-Support**. Der Login nutzt ROPC (Resource Owner Password
+   Credentials), das funktioniert mit Keycloak nicht bei aktiviertem MFA.
+   Workaround: MFA für den Account aus, der die Bridge nutzt.
 
-## Project layout
+## Update auf eine neue Version
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Die Bridge holt sich das neueste Image aus
+[GitHub Container Registry](https://github.com/twobeass/daely-google-bridge/pkgs/container/daely-google-bridge),
+deine `data/`- und `secrets/`-Verzeichnisse bleiben unangetastet.
+
+## Repo-Struktur
 
 ```
 .
-├── README.md                 — this file
+├── README.md                 — dieses Dokument
 ├── LICENSE                   — MIT
-├── daely-google-bridge/      — the bridge itself: Python package + Dockerfile
-│   ├── README.md             — developer-oriented docs
-│   ├── src/, tests/          — code + 131 tests, ~91% coverage
+├── daely-google-bridge/      — die Bridge selbst (Python-Package + Dockerfile)
+│   ├── README.md             — entwicklerorientierte Tech-Doku (englisch)
+│   ├── src/, tests/          — Code + 131 Tests, ~91 % Coverage
 │   └── docker-compose.yml
-├── findings/                 — reverse-engineering writeups that informed the
-│                              bridge (08 markdown files); not needed to use
-│                              the bridge, useful if you want to extend it
-├── scripts/                  — the live-read & anonymisation tools used to
-│                              produce the test fixtures
-└── tests/fixtures_anonymized/ — anonymised snapshots of real Daely API
-                                 responses; the test suite runs against these
-                                 fully offline
+├── findings/                 — 9 Markdown-Docs, dokumentieren das Reverse-
+│                              Engineering der Daely-API. Nicht nötig zum
+│                              Betrieb der Bridge — interessant, falls du
+│                              die API selbst erweitern oder ähnliches Tool
+│                              schreiben willst.
+├── scripts/                  — Live-Read- und Anonymisierungs-Tools, die
+│                              die Test-Fixtures erzeugen.
+└── tests/fixtures_anonymized/ — anonymisierte Snapshots echter Daely-API-
+                                 Antworten; die Test-Suite läuft komplett
+                                 offline gegen diese Daten.
 ```
 
-The technical bridge documentation lives in
-[`daely-google-bridge/README.md`](daely-google-bridge/README.md) — including
-running tests, mapping decisions, and a troubleshooting section.
+Tech-Doku zur Bridge:
+[`daely-google-bridge/README.md`](daely-google-bridge/README.md) (englisch).
+RE-Story:
+[`findings/00_OVERVIEW.md`](findings/00_OVERVIEW.md).
 
-The story of how the API was figured out lives under
-[`findings/`](findings/) — start with `00_OVERVIEW.md`.
+## Wie die Bridge entstanden ist
 
-## How was this built
+Daelys offizielle App ist eine Flutter-Android-App (Dart-AOT-kompiliert),
+also kein üblicher Decompiler-Workflow. Stattdessen:
 
-Daely's official app is a Flutter (Dart-AOT) Android binary, so a typical
-APK-decompile workflow doesn't show much. The approach used here was:
+1. **Statische Analyse** mit [blutter](https://github.com/worawit/blutter)
+   gegen `libapp.so` — rekonstruiert Dart-Klassen, Felder, Enum-Werte und
+   String-Konstanten. Bringt einen auf ~80 % der API-Form.
+2. **Ein Live-Read-Skript** mit explizitem Pro-Call-Approval, das jeden
+   Kandidaten-Endpoint genau einmal abfragt und die JSON-Antwort
+   archiviert. Schließt die letzten Lücken.
+3. **Anonymisierung**: ein eigener Script ersetzt UUIDs, Namen, Emails
+   und Sync-Tokens durch deterministische Test-Werte, damit die
+   Test-Suite gegen Real-Shape-Daten laufen kann, ohne dass jemals
+   echte Daten committed werden.
+4. **Bridge** Python-seitig outside-in: erst pure Funktionen (Mapper,
+   Modelle), dann ein SQLite-Store, dann HTTP-Clients mit respx- und
+   Mock-Tests, dann Sync-Orchestrator, dann OAuth + CLI, dann Docker
+   inklusive GitHub-Actions-Pipeline für das Image.
 
-1. **Static analysis with [blutter](https://github.com/worawit/blutter)** on
-   the `libapp.so` to recover Dart class layouts, model fields, enum values,
-   and string constants. Got us to ~80% of the picture.
-2. **A small live-read script** with explicit per-call user approval that
-   exercised each candidate endpoint once, captured the JSON response, and
-   filled in the gaps blutter couldn't.
-3. **Anonymisation tooling** that replaces personal UUIDs, names, emails, and
-   sync tokens in those captures with deterministic placeholders, so the test
-   suite can run against real-shape data without ever shipping real data.
-4. **A Python bridge** built outside-in: pure functions first (mapper,
-   models), then a SQLite store, then HTTP clients with respx- and
-   `unittest.mock`-driven tests, then a sync orchestrator, then OAuth + CLI,
-   then Docker.
+Alle 131 Tests laufen offline. Keine Live-Calls in CI.
 
-131 tests run offline. No live calls in CI.
+## Disclaimer
 
-## Disclaimer & legal
+- Dieses Projekt ist **nicht von daely-shop.com oder Moonlight Studio
+  affiliiert**. „Dæly" und die Produkt-Marken gehören ihren jeweiligen
+  Eigentümern.
+- Die Bridge benutzt nur Hardware und Accounts, die ihrem Betreiber gehören.
+  Sie spricht dieselbe öffentliche API wie die offizielle App und nutzt
+  keine Sicherheitslücken aus.
+- Die Findings unter `findings/` beschreiben die API, wie sie aus einer
+  legitim authentifizierten Session sichtbar war — keine Credentials,
+  keine Tokens, keine personenbezogenen Daten.
+- Wenn du das Tool gegen einen Account einsetzt, der dir nicht gehört, ist
+  das deine Sache.
+- Bridge ist AS-IS unter [MIT-Lizenz](LICENSE). Bevor du sie auf einen
+  produktiv genutzten Google-Kalender los lässt: einmal `bridge run --once`
+  laufen lassen und Output kontrollieren.
 
-- This project is **not affiliated with** daely-shop.com or Moonlight Studio.
-  „Dæly" and the product trademarks belong to their respective owners.
-- The bridge only operates on accounts and hardware that the operator owns.
-  It uses the same public API the official app uses; it does not exploit any
-  vulnerability and does not bypass any access control.
-- The findings in `findings/` describe the API surface as observed from a
-  legitimate authenticated session. They do not include credentials, tokens,
-  or any other personal data.
-- If you operate this against an account you don't own, that's on you.
-- The bridge is provided AS-IS under the [MIT license](LICENSE). It writes
-  events to your Google Calendar; before pointing it at a calendar you care
-  about, run `bridge run --once` once and inspect the output.
+## Mitmachen
 
-## Contributing
+Issues und PRs willkommen. Die Test-Suite (`pytest -q` aus
+`daely-google-bridge/`) ist der beste Einstieg — jede Verhaltensänderung hat
+einen Test. Bei Netzwerk-Code bitte mocken; Live-Calls in CI sind in diesem
+Repo bewusst nicht vorgesehen.
 
-Issues and PRs welcome. The test suite (`pytest -q` from inside
-`daely-google-bridge/`) is a good entry point — every behavioural change has
-a test. If you're adding a feature that talks to the network, please mock the
-network in tests; live calls in CI are out of scope for this repo.
-
-If your contribution requires a new fixture, please run it through
-`scripts/anonymize_fixtures.py` before committing — never commit raw API
-responses.
+Falls dein Beitrag eine neue Test-Fixture braucht: vorher durch
+`scripts/anonymize_fixtures.py` jagen — niemals rohe API-Responses
+committen.
 
 ## Status
 
-| Phase | Status | Scope |
+| Phase | Status | Inhalt |
 |---|---|---|
-| 3a | ✅ | live read & fixture anonymisation |
-| 3b | ✅ | mapper + store, pure logic |
-| 3c | ✅ | HTTP clients + bootstrap CLI |
-| 3d | ✅ | sync orchestrator + scheduler |
-| 3e | ✅ | profile-footer in event descriptions |
-| 3f | ✅ | Dockerfile + compose |
-| next | — | one-shot `bridge resync <cal_id>` for forced re-pushes |
+| 3a | ✅ | Live-Read & Fixture-Anonymisierung |
+| 3b | ✅ | Mapper + Store, pure Logik |
+| 3c | ✅ | HTTP-Clients + Bootstrap-CLI |
+| 3d | ✅ | Sync-Orchestrator + Scheduler |
+| 3e | ✅ | Profil-Footer in Event-Description |
+| 3f | ✅ | Dockerfile + Compose + ghcr.io-Publishing |
+| nächste | — | `bridge resync <cal_id>` für Force-Re-Push einzelner Kalender |
