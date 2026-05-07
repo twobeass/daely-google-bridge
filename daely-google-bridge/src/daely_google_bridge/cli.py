@@ -180,6 +180,7 @@ def cmd_bootstrap(
     google_creds = auth_fn(
         cfg.google_oauth_client_secrets_file,
         scopes=cfg.google_oauth_scopes,
+        port=cfg.oauth_local_port,
     )
     GoogleClient.persist_credentials(google_creds, store)
     print("  Google authorization OK.\n")

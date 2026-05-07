@@ -27,6 +27,18 @@ class BridgeConfig(BaseModel):
     google_oauth_scopes: list[str] = Field(
         default_factory=lambda: ["https://www.googleapis.com/auth/calendar"],
     )
+    oauth_local_port: int = Field(
+        default=8080,
+        ge=1024,
+        le=65535,
+        description=(
+            "Port the InstalledAppFlow listens on for the OAuth-callback during "
+            "bootstrap. Default 8080. Override if that port is already taken on "
+            "the host (e.g. by another service). The same port must be used in "
+            "the SSH tunnel (`ssh -L <port>:localhost:<port> ...`) and, when "
+            "running in Docker, in the bootstrap service's port mapping."
+        ),
+    )
 
     # Profile → Google sub-calendar mapping
     # key = Daely profile UUID; value = Google calendarId

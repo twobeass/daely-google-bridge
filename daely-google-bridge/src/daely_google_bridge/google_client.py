@@ -56,12 +56,15 @@ class GoogleClient:
         client_secrets_path: Path | str,
         *,
         scopes: list[str] | None = None,
+        port: int = 8080,
     ) -> Credentials:
         """Run the InstalledAppFlow on a fixed local port (headless-friendly).
 
         Tailored for headless VM use:
-        - Port hard-coded to 8080 so the user's SSH tunnel
-          (`ssh -L 8080:localhost:8080 user@vm`) always lines up.
+        - `port` defaults to 8080. Override via the `oauth_local_port` config
+          field if 8080 is already taken on the host. The chosen port must
+          match the SSH tunnel and (in Docker) the bootstrap service's port
+          mapping.
         - `open_browser=False` because there is no browser on the VM. The user
           opens the printed URL on their local machine.
         - Bind host is `localhost` by default. Inside Docker, set
@@ -76,20 +79,22 @@ class GoogleClient:
             scopes=scopes or DEFAULT_SCOPES,
         )
         bind_host = os.environ.get("BRIDGE_OAUTH_HOST", "localhost")
+        # `{url}` is escaped via doubled braces — google-auth-oauthlib
+        # substitutes it at runtime; the f-string only fills in the port.
         creds = flow.run_local_server(
             host=bind_host,
-            port=8080,
+            port=port,
             open_browser=False,
             authorization_prompt_message=(
-                "\n=== Google OAuth ===\n"
-                "1. Stelle sicher, dass dein SSH-Tunnel offen ist:\n"
-                "     ssh -L 8080:localhost:8080 user@vm-ip\n"
-                "2. Öffne diese URL im Browser auf deinem LOKALEN Rechner:\n\n"
-                "     {url}\n\n"
-                "3. Bei der 'App nicht verifiziert'-Warnung:\n"
-                "     Erweitert -> Weiter zu Daely Google Bridge\n"
-                "4. Berechtigungen 'calendar' bestätigen.\n"
-                "Warte auf Redirect (Browser sollte 'Erfolg' zeigen)..."
+                f"\n=== Google OAuth ===\n"
+                f"1. Stelle sicher, dass dein SSH-Tunnel offen ist:\n"
+                f"     ssh -L {port}:localhost:{port} user@vm-ip\n"
+                f"2. Öffne diese URL im Browser auf deinem LOKALEN Rechner:\n\n"
+                f"     {{url}}\n\n"
+                f"3. Bei der 'App nicht verifiziert'-Warnung:\n"
+                f"     Erweitert -> Weiter zu Daely Google Bridge\n"
+                f"4. Berechtigungen 'calendar' bestätigen.\n"
+                f"Warte auf Redirect (Browser sollte 'Erfolg' zeigen)..."
             ),
             success_message=(
                 "Login erfolgreich. Du kannst dieses Browserfenster schließen "

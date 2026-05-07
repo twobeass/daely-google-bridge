@@ -43,8 +43,11 @@ services:
     environment:
       - TZ=${TZ:-Europe/Berlin}
       - BRIDGE_OAUTH_HOST=0.0.0.0
+    # If you set `oauth_local_port` in config.yaml to something other than
+    # 8080, override OAUTH_LOCAL_PORT here too — and use the same number in
+    # your SSH tunnel (`ssh -L NNNN:localhost:NNNN ...`).
     ports:
-      - "8080:8080"
+      - "${OAUTH_LOCAL_PORT:-8080}:${OAUTH_LOCAL_PORT:-8080}"
     stdin_open: true
     tty: true
     command: ["bootstrap"]

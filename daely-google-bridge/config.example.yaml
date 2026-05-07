@@ -18,6 +18,10 @@ google_oauth_client_secrets_file: ./secrets/google_oauth_client.json
 google_oauth_scopes:
   - https://www.googleapis.com/auth/calendar
 
+# OAuth-Local-Server-Port. Default 8080. Override via einen anderen Port
+# (z. B. 8765), falls 8080 schon belegt ist. Muss zum SSH-Tunnel-Port passen.
+oauth_local_port: 8080
+
 
 # ─── Profile → Google sub-calendar mapping ──────────────────────
 # This is the routing table the mapper uses. Bootstrap populates it

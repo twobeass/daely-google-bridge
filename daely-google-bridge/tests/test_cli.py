@@ -250,8 +250,10 @@ def test_bootstrap_full_dry_run(bootstrap_setup, monkeypatch):
     # Daely login was called with config email (not stubbed input, since email is set)
     daely.login_password.assert_called_once_with("user1@example.com", "password-from-test")
 
-    # Google authorize invoked with secrets path
+    # Google authorize invoked with secrets path AND the port from config (default 8080)
     google_authorize.assert_called_once()
+    auth_kwargs = google_authorize.call_args.kwargs
+    assert auth_kwargs.get("port") == 8080
 
     # Two calendars created: one for prof-A, one fallback (Daely – Family)
     create_calls = google_client.create_calendar.call_args_list

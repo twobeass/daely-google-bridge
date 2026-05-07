@@ -15,6 +15,14 @@ google_oauth_client_secrets_file: /secrets/google_oauth_client.json
 google_oauth_scopes:
   - https://www.googleapis.com/auth/calendar
 
+# OAuth-Local-Server-Port. Default 8080. Bei Konflikt mit anderen Diensten
+# auf der VM kann hier ein anderer Port gewählt werden (z. B. 8765).
+# Achtung: muss mit dem SSH-Tunnel-Port übereinstimmen
+# (`ssh -L PORT:localhost:PORT ...`) UND mit dem Port-Mapping des
+# bootstrap-Service in der docker-compose.yml — dort ist es per
+# OAUTH_LOCAL_PORT-env-Variable überschreibbar.
+oauth_local_port: 8080
+
 
 # ─── Profile → Google sub-calendar mapping ──────────────────────
 # Bootstrap writes here. Empty {} until you run it.
