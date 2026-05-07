@@ -73,13 +73,16 @@ curl -o config.yaml https://raw.githubusercontent.com/twobeass/daely-google-brid
 
 # 2. Verzeichnisse für State + Secrets
 mkdir -p data secrets
-sudo chown -R 1100:1100 data           # Container läuft als uid 1100
 chmod 700 secrets
 
 # 3. Konfig editieren + OAuth-Secrets reinkopieren
 ${EDITOR:-vi} config.yaml              # daely_email setzen, Rest kann bleiben
 cp /pfad/zu/google_oauth_client.json secrets/
 chmod 600 secrets/google_oauth_client.json
+
+# 4. Beides dem Bridge-User (uid 1100 im Container) übereignen,
+#    damit der Container data/ schreiben und secrets/ lesen kann
+sudo chown -R 1100:1100 data secrets
 
 # 4. Image ziehen (vorgebaut auf ghcr.io, multi-arch amd64+arm64)
 docker compose pull

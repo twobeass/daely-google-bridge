@@ -123,9 +123,15 @@ is writeable for that uid:
 
 ```bash
 mkdir -p data secrets
-sudo chown -R 1100:1100 data
 chmod 700 secrets
+# after dropping config.yaml + google_oauth_client.json into place:
+sudo chown -R 1100:1100 data secrets
 ```
+
+The chown applies to **both** directories — the container needs write
+access to `data/` (for `bridge.db`) AND read access to `secrets/`
+(for `google_oauth_client.json`). Skipping `secrets/` causes a
+`PermissionError` during bootstrap.
 
 If you can't change ownership (e.g. because the host has a strict uid map),
 edit the Dockerfile's `useradd --uid 1100` to match your host user.
