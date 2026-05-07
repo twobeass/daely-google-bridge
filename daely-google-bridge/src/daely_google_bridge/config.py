@@ -75,13 +75,25 @@ def load_config(path: Path | str) -> BridgeConfig:
 def save_config(cfg: BridgeConfig, path: Path | str, *, backup: bool = True) -> None:
     """Persist config to YAML.
 
+    Writes in place (truncate-and-overwrite). Critically, this does NOT
+    rename the file — Docker bind-mounted files can't be renamed (the
+    kernel returns `EBUSY: Device or resource busy` because the inode is
+    the mount target). Pathlib.write_text() opens for writing and
+    truncates, which works through bind-mounts.
+
     If `backup=True` and the file already exists, the previous version is
-    preserved at `<path>.bak`. Bootstrap uses this when rewriting after
-    creating Google sub-calendars.
+    copied to `<path>.bak` (best-effort: a backup that fails to write
+    doesn't block the main update — for example, if a parent dir isn't
+    writable inside a container, we just skip the backup and log nothing).
     """
     p = Path(path)
     if backup and p.exists():
-        p.rename(p.with_suffix(p.suffix + ".bak"))
+        backup_path = p.with_suffix(p.suffix + ".bak")
+        try:
+            backup_path.write_bytes(p.read_bytes())
+        except OSError:
+            # best-effort; the main config update is what matters
+            pass
     data = cfg.model_dump(mode="json", exclude_none=True)
     p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 

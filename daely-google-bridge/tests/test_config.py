@@ -80,6 +80,65 @@ def test_save_no_backup_when_disabled(tmp_path):
     assert not p.with_suffix(".yaml.bak").exists()
 
 
+def test_save_does_not_rename_main_file(tmp_path, monkeypatch):
+    """Critical for Docker: bind-mounted files cannot be renamed (EBUSY).
+    save_config must overwrite in place, not call Path.rename on the target.
+    """
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "daely_email: old@example.com\n"
+        "google_oauth_client_secrets_file: /tmp/x\n"
+    )
+    original_inode = p.stat().st_ino
+
+    # Force any rename attempt to fail loudly so we'd notice if save_config
+    # accidentally re-introduced one in the future.
+    def _no_rename(self, target):
+        raise OSError(16, "Device or resource busy", str(self))
+    monkeypatch.setattr(Path, "rename", _no_rename)
+
+    cfg = BridgeConfig(
+        daely_email="new@example.com",
+        google_oauth_client_secrets_file=Path("/tmp/y"),
+    )
+    save_config(cfg, p, backup=True)  # must succeed despite rename being broken
+
+    # main file: same inode (in-place overwrite), new content
+    assert p.stat().st_ino == original_inode
+    loaded = load_config(p)
+    assert loaded.daely_email == "new@example.com"
+    # backup written separately (copy, not rename)
+    assert p.with_suffix(".yaml.bak").exists()
+    assert "old@example.com" in p.with_suffix(".yaml.bak").read_text()
+
+
+def test_save_tolerates_unwritable_backup_path(tmp_path, monkeypatch):
+    """If the backup write fails (e.g. read-only parent in container), the
+    main config still gets updated — backup is best-effort, not blocking."""
+    p = tmp_path / "config.yaml"
+    p.write_text("daely_email: old@example.com\ngoogle_oauth_client_secrets_file: /tmp/x\n")
+
+    real_write_bytes = Path.write_bytes
+
+    def _selective_write_bytes(self, data):
+        if self.suffix == ".bak":
+            raise OSError("simulated read-only backup target")
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", _selective_write_bytes)
+
+    cfg = BridgeConfig(
+        daely_email="new@example.com",
+        google_oauth_client_secrets_file=Path("/tmp/y"),
+    )
+    save_config(cfg, p, backup=True)  # must not raise
+
+    loaded = load_config(p)
+    assert loaded.daely_email == "new@example.com"
+    # backup wasn't written (simulated failure)
+    assert not p.with_suffix(".yaml.bak").exists()
+
+
 def test_load_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "does-not-exist.yaml")

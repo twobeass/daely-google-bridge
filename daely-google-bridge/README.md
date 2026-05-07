@@ -126,12 +126,18 @@ mkdir -p data secrets
 chmod 700 secrets
 # after dropping config.yaml + google_oauth_client.json into place:
 sudo chown -R 1100:1100 data secrets
+sudo chown 1100:1100 config.yaml
 ```
 
-The chown applies to **both** directories — the container needs write
-access to `data/` (for `bridge.db`) AND read access to `secrets/`
-(for `google_oauth_client.json`). Skipping `secrets/` causes a
-`PermissionError` during bootstrap.
+The chown applies to **all three** paths:
+- `data/` — container writes `bridge.db` here.
+- `secrets/` — container reads `google_oauth_client.json` here.
+- `config.yaml` — bootstrap writes the Google calendar IDs back into
+  this file after creating the sub-calendar(s).
+
+Skipping `secrets/` causes a `PermissionError` reading the OAuth client
+JSON; skipping `config.yaml` causes a `PermissionError` writing the
+mapping back at the end of bootstrap.
 
 If you can't change ownership (e.g. because the host has a strict uid map),
 edit the Dockerfile's `useradd --uid 1100` to match your host user.
