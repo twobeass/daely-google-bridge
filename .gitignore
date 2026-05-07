@@ -32,6 +32,9 @@ apk/
 decompiled/
 findings/blutter_out/
 
+# Internal RE-mission file — local notes only, not for the public repo
+CLAUDE.md
+
 
 # ────────── Bridge runtime data ──────────
 *.db
