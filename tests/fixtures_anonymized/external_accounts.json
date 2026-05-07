@@ -1,0 +1,11 @@
+[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "userId": "00000000-0000-0000-0001-000000000001",
+    "accountId": "999999999999999999991",
+    "accountName": "user1@example.com",
+    "accountType": 1,
+    "hasError": false,
+    "connectedCalendars": null
+  }
+]

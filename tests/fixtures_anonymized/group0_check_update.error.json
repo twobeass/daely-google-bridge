@@ -1,0 +1,9 @@
+{
+  "title": "Test Event 35",
+  "status": 400,
+  "errors": {
+    "calendarId": [
+      "The value 'check-update' is not valid."
+    ]
+  }
+}

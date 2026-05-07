@@ -1,0 +1,6 @@
+{
+  "statusCode": 400,
+  "errorCode": null,
+  "message": "StartDate and EndDate must be valid.",
+  "details": null
+}

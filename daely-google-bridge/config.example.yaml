@@ -1,0 +1,47 @@
+# daely-google-bridge — example config
+# Copy to config.yaml, edit, then run `bridge bootstrap` to populate the mapping.
+
+# ─── Daely account ───────────────────────────────────────────────
+# Login email of the user that owns the Daely calendar. Password is NEVER stored
+# here; bootstrap will prompt and persist a refresh-token in the SQLite store.
+daely_email: you@example.com
+
+# Minimum pause between consecutive Daely API calls (in seconds).
+# Be polite to the backend.
+daely_min_pause_seconds: 1.0
+
+
+# ─── Google ──────────────────────────────────────────────────────
+# Path to the OAuth-client-secrets JSON downloaded from Google Cloud Console.
+# Required scopes are read+write on Calendar.
+google_oauth_client_secrets_file: ./secrets/google_oauth_client.json
+google_oauth_scopes:
+  - https://www.googleapis.com/auth/calendar
+
+
+# ─── Profile → Google sub-calendar mapping ──────────────────────
+# This is the routing table the mapper uses. Bootstrap populates it
+# automatically after creating one Google sub-calendar per Daely profile.
+# Key is the Daely profile UUID; value is the Google calendarId
+# (e.g. "abcd1234@group.calendar.google.com").
+profile_calendar_mapping: {}
+
+# Optional: target calendar for events whose Daely calendar has no profileId
+# (e.g. shared family calendars). If unset, those events are skipped.
+fallback_google_calendar_id: null
+
+
+# ─── Sync schedule ───────────────────────────────────────────────
+poll_interval_minutes: 15
+lookback_days: 30
+lookahead_days: 365
+
+
+# ─── Storage ─────────────────────────────────────────────────────
+db_path: ./bridge.db
+
+
+# ─── Logging ─────────────────────────────────────────────────────
+log_level: INFO        # DEBUG / INFO / WARNING / ERROR
+log_format: json       # "json" or "text"
+log_file: null         # null → stdout

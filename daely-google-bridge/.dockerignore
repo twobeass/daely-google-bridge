@@ -1,0 +1,35 @@
+# test artefacts and dev-only files
+tests/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# secrets must NEVER be baked into the image
+secrets/
+*.db
+*.db-journal
+config.yaml
+config.yaml.bak
+
+# editor / OS
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# git + docs not needed in the image
+.git/
+.gitignore
+docker/Dockerfile
+Dockerfile
+docker-compose.yml
+.dockerignore

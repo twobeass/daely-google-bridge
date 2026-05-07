@@ -1,0 +1,69 @@
+# ────────── Secrets — NEVER commit ──────────
+# User-supplied credentials (raw)
+**/credentials.env
+**/credentials.json
+**/tokens.json
+.daely-secrets/
+
+# OAuth client secrets (Google / others)
+**/google_oauth_client.json
+**/oauth_client*.json
+**/client_secret*.json
+secrets/
+
+# Live, non-anonymized fixtures and the un-anonymisation map
+tests/fixtures_private/
+tests/fixtures_private/*
+
+# Personalised configs (the templates *.example.yaml are committed)
+**/config.yaml
+**/config.yaml.bak
+!**/config.example.yaml
+!**/config.docker.example.yaml
+
+# Environment files in any form
+**/.env
+**/.env.*
+!**/.env.example
+
+
+# ────────── Reverse-engineering artefacts (large + IP-sensitive) ──────────
+apk/
+decompiled/
+findings/blutter_out/
+
+
+# ────────── Bridge runtime data ──────────
+*.db
+*.db-journal
+**/bridge.db*
+data/
+logs/
+
+
+# ────────── Python ──────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+
+# ────────── OS ──────────
+.DS_Store
+Thumbs.db
+
+
+# ────────── Editors / IDEs ──────────
+.vscode/
+.idea/
+*.swp
+*~

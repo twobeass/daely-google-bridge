@@ -1,0 +1,151 @@
+{
+  "obtained_at": "2026-05-07T08:00:36.938692+00:00",
+  "api_base": "https://daely-connect.com",
+  "client_id": "mobile-app",
+  "calls": [
+    {
+      "name": "users_me",
+      "path": "/api/users/me",
+      "params": null,
+      "status": 200,
+      "content_length": 172,
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "name": "groups",
+      "path": "/api/groups",
+      "params": null,
+      "status": 404,
+      "content_length": 0,
+      "content_type": null
+    },
+    {
+      "name": "external_accounts",
+      "path": "/api/external-accounts",
+      "params": null,
+      "status": 200,
+      "content_length": 275,
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "name": "url_calendars",
+      "path": "/api/url-calendars",
+      "params": null,
+      "status": 200,
+      "content_length": 2,
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "name": "groups_me",
+      "path": "/api/groups/me",
+      "params": null,
+      "status": 200,
+      "content_length": 141,
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "name": "group0_calendars",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars",
+      "params": null,
+      "status": 200,
+      "content_length": 1407,
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "name": "group0_calendars_with_events_attempt0",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/with-events",
+      "params": {
+        "from": "2026-04-07T08:08:04.963149Z",
+        "to": "2026-06-06T08:08:04.963149Z"
+      },
+      "status": 400,
+      "content_length": 99,
+      "content_type": "application/json"
+    },
+    {
+      "name": "group0_calendars_with_events_attempt1",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/with-events",
+      "params": {
+        "start": "2026-04-07T08:08:04.963149Z",
+        "end": "2026-06-06T08:08:04.963149Z"
+      },
+      "status": 400,
+      "content_length": 99,
+      "content_type": "application/json"
+    },
+    {
+      "name": "group0_calendars_with_events_attempt2",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/with-events",
+      "params": {
+        "timeMin": "2026-04-07T08:08:04.963149Z",
+        "timeMax": "2026-06-06T08:08:04.963149Z"
+      },
+      "status": 400,
+      "content_length": 99,
+      "content_type": "application/json"
+    },
+    {
+      "name": "group0_calendars_with_events_attempt3",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/with-events",
+      "params": null,
+      "status": 400,
+      "content_length": 99,
+      "content_type": "application/json"
+    },
+    {
+      "name": "group0_check_update",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/check-update",
+      "params": {
+        "internal": "",
+        "external": ""
+      },
+      "status": 400,
+      "content_length": 165,
+      "content_type": "application/problem+json; charset=utf-8"
+    },
+    {
+      "name": "group0_calendars_with_events_v2_attempt0",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/with-events",
+      "params": {
+        "startDate": "2026-04-07",
+        "endDate": "2026-06-06"
+      },
+      "status": 200,
+      "content_length": 75954,
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "name": "group0_cal0_check_update",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/00000000-0000-0000-0002-000000000002/check-update",
+      "params": {
+        "internal": "",
+        "external": ""
+      },
+      "status": 404,
+      "content_length": 0,
+      "content_type": null
+    },
+    {
+      "name": "group0_cal1_check_update",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/00000000-0000-0000-0002-000000000001/check-update",
+      "params": {
+        "internal": "",
+        "external": ""
+      },
+      "status": 404,
+      "content_length": 0,
+      "content_type": null
+    },
+    {
+      "name": "group0_cal2_check_update",
+      "path": "/api/groups/00000000-0000-0000-0002-000000000001/calendars/00000000-0000-0000-0002-000000000003/check-update",
+      "params": {
+        "internal": "",
+        "external": ""
+      },
+      "status": 404,
+      "content_length": 0,
+      "content_type": null
+    }
+  ]
+}

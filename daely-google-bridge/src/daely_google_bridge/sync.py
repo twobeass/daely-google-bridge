@@ -1,0 +1,387 @@
+"""Sync orchestrator — Daely → Google Calendar.
+
+Two entry points:
+
+- `full_sync()`        scans `[today − lookback_days, today + lookahead_days]`,
+                       inserts/patches/deletes, AND detects deletions by
+                       diffing the snapshot against the store.
+- `incremental_sync()` scans a smaller rolling window (1 day back, 30 days
+                       forward), only acts on `deleted=true` flags from the
+                       snapshot. Long-term physical deletes are caught by
+                       a periodic `full_sync`.
+
+Both call into a shared `_run_sync()` helper.
+
+Error model: per-event errors are isolated. A single event that fails to
+insert/patch/delete is recorded in `SyncReport.errors` and the sync continues
+with the next event. Authentication errors at the Daely or Google level
+propagate (they make further work impossible).
+
+State: the store's `event_mapping` table is the bridge's view of the world.
+After every sync action, the corresponding mapping row is upserted (or
+deleted) so reruns are convergent.
+"""
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+
+import structlog
+
+from .config import BridgeConfig
+from .daely_client import DaelyClient
+from .google_client import GoogleClient
+from .mapper import (
+    daely_event_to_google,
+    deduplicate_recurring,
+    select_target_calendar_id,
+    should_skip_calendar,
+)
+from .models import Calendar, CalendarEvent, CalendarWithEvents
+from .store import EventMapping, Store
+
+log = structlog.get_logger(__name__)
+
+
+@dataclass
+class SyncReport:
+    """Result of one sync cycle.
+
+    `errors` is a list of (daely_id, message) tuples. The daely_id is empty
+    for non-event-scoped failures (e.g. "no groups").
+    """
+    inserts: int = 0
+    patches: int = 0
+    deletes: int = 0
+    no_ops: int = 0
+    skipped_external_calendar_events: int = 0
+    skipped_no_target_events: int = 0
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    duration_seconds: float = 0.0
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+
+    @property
+    def total_actions(self) -> int:
+        return self.inserts + self.patches + self.deletes
+
+    def __str__(self) -> str:  # pragma: no cover (cosmetic)
+        return (
+            f"SyncReport(run_id={self.run_id} "
+            f"inserts={self.inserts} patches={self.patches} "
+            f"deletes={self.deletes} no_ops={self.no_ops} "
+            f"skip_external={self.skipped_external_calendar_events} "
+            f"skip_no_target={self.skipped_no_target_events} "
+            f"errors={len(self.errors)} duration={self.duration_seconds:.2f}s)"
+        )
+
+
+# ─────────────── helpers ───────────────
+
+def _store_key(event: CalendarEvent) -> str:
+    """Return the stable Daely-side key under which the bridge stores a mapping.
+
+    For non-recurring events this is just `event.id`. For recurring events the
+    composite id (`<master>_<startUTC>`) of the dedup survivor changes between
+    sync windows when the earliest occurrence shifts; using the master UUID
+    keeps the mapping stable across windows.
+    """
+    return event.recurringId or event.id
+
+
+def _delete_via_google(
+    *,
+    google: GoogleClient,
+    mapping: EventMapping,
+    store: Store,
+    report: SyncReport,
+) -> None:
+    try:
+        google.delete_event(mapping.google_calendar_id, mapping.google_event_id)
+        store.delete_event_mapping(mapping.daely_id)
+        report.deletes += 1
+        log.info(
+            "sync.delete.ok",
+            run_id=report.run_id,
+            daely_id=mapping.daely_id,
+            google_event_id=mapping.google_event_id,
+        )
+    except Exception as e:
+        msg = f"delete: {e!r}"
+        report.errors.append((mapping.daely_id, msg))
+        log.warning(
+            "sync.delete.error",
+            run_id=report.run_id,
+            daely_id=mapping.daely_id,
+            err=msg,
+        )
+
+
+def _process_event(
+    *,
+    event: CalendarEvent,
+    daely_calendar: Calendar,
+    google_calendar_id: str,
+    google: GoogleClient,
+    store: Store,
+    profile_calendar_map: dict[str, str],
+    profiles_map: dict[str, str] | None,
+    report: SyncReport,
+) -> None:
+    """Handle one (already-deduped) Daely event."""
+    daely_id = _store_key(event)
+
+    # Soft-delete from Daely → propagate to Google.
+    if event.deleted:
+        existing = store.get_event_mapping(daely_id)
+        if existing is not None:
+            _delete_via_google(
+                google=google, mapping=existing, store=store, report=report,
+            )
+        return
+
+    body = daely_event_to_google(
+        event, daely_calendar, profile_calendar_map, profiles_map=profiles_map,
+    )
+    if body is None:
+        # mapper said skip — should be unreachable here (caller pre-filters by
+        # calendarType), but guard against future filter extensions.
+        return
+
+    existing = store.get_event_mapping(daely_id)
+    if existing is None:
+        # Insert
+        try:
+            response = google.insert_event(google_calendar_id, body)
+            store.put_event_mapping(
+                daely_id=daely_id,
+                daely_calendar_id=daely_calendar.id,
+                google_event_id=response["id"],
+                google_calendar_id=google_calendar_id,
+                last_seen_updated=event.updated,
+            )
+            report.inserts += 1
+            log.info(
+                "sync.insert.ok",
+                run_id=report.run_id,
+                daely_id=daely_id,
+                google_event_id=response["id"],
+            )
+        except Exception as e:
+            msg = f"insert: {e!r}"
+            report.errors.append((daely_id, msg))
+            log.warning(
+                "sync.insert.error",
+                run_id=report.run_id, daely_id=daely_id, err=msg,
+            )
+        return
+
+    # Mapping exists — patch only if the event has actually changed in Daely.
+    if existing.last_seen_updated == event.updated:
+        report.no_ops += 1
+        return
+
+    try:
+        google.patch_event(
+            existing.google_calendar_id, existing.google_event_id, body,
+        )
+        store.put_event_mapping(
+            daely_id=daely_id,
+            daely_calendar_id=daely_calendar.id,
+            google_event_id=existing.google_event_id,
+            google_calendar_id=existing.google_calendar_id,
+            last_seen_updated=event.updated,
+        )
+        report.patches += 1
+        log.info(
+            "sync.patch.ok",
+            run_id=report.run_id,
+            daely_id=daely_id,
+            google_event_id=existing.google_event_id,
+        )
+    except Exception as e:
+        msg = f"patch: {e!r}"
+        report.errors.append((daely_id, msg))
+        log.warning(
+            "sync.patch.error",
+            run_id=report.run_id, daely_id=daely_id, err=msg,
+        )
+
+
+def _process_calendar(
+    cwe: CalendarWithEvents,
+    *,
+    google: GoogleClient,
+    store: Store,
+    profile_calendar_map: dict[str, str],
+    profiles_map: dict[str, str] | None,
+    fallback_google_calendar_id: str | None,
+    detect_missing_as_deleted: bool,
+    report: SyncReport,
+) -> None:
+    if should_skip_calendar(cwe):
+        report.skipped_external_calendar_events += len(cwe.events)
+        return
+
+    try:
+        target = select_target_calendar_id(
+            cwe.profileId, profile_calendar_map,
+            fallback_calendar_id=fallback_google_calendar_id,
+        )
+    except KeyError:
+        report.skipped_no_target_events += len(cwe.events)
+        report.errors.append((
+            cwe.id,
+            f"no target calendar for profile {cwe.profileId!r} "
+            f"(fallback also unset)",
+        ))
+        return
+
+    deduped = deduplicate_recurring(cwe.events)
+    seen_keys = {_store_key(e) for e in deduped if not e.deleted}
+
+    for ev in deduped:
+        _process_event(
+            event=ev,
+            daely_calendar=cwe,
+            google_calendar_id=target,
+            google=google,
+            store=store,
+            profile_calendar_map=profile_calendar_map,
+            profiles_map=profiles_map,
+            report=report,
+        )
+
+    if detect_missing_as_deleted:
+        for mapping in store.event_mappings_for_daely_calendar(cwe.id):
+            if mapping.daely_id in seen_keys:
+                continue
+            _delete_via_google(
+                google=google, mapping=mapping, store=store, report=report,
+            )
+
+
+# ─────────────── public entry points ───────────────
+
+def _run_sync(
+    daely: DaelyClient,
+    google: GoogleClient,
+    store: Store,
+    config: BridgeConfig,
+    *,
+    start_date: date,
+    end_date: date,
+    detect_missing_as_deleted: bool,
+) -> SyncReport:
+    report = SyncReport()
+    t0 = time.monotonic()
+    log.info(
+        "sync.start",
+        run_id=report.run_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        detect_missing_as_deleted=detect_missing_as_deleted,
+    )
+
+    groups = daely.get_my_groups()
+    if not groups:
+        report.errors.append(("", "no Daely groups returned"))
+        return _finalize(report, t0)
+    group = groups[0]
+
+    # Phase 3e: load profile-name lookup once per cycle. A failure here
+    # demotes the description-footer to a no-op but doesn't abort the sync.
+    profiles_map: dict[str, str] = {}
+    try:
+        profiles = daely.get_profiles(group.id)
+        profiles_map = {p.id: p.name for p in profiles if p.name}
+        log.info(
+            "sync.profiles_loaded", run_id=report.run_id, count=len(profiles_map),
+        )
+    except Exception as e:
+        log.warning(
+            "sync.profile_fetch_failed", run_id=report.run_id, error=repr(e),
+        )
+
+    cwes = daely.get_calendars_with_events(
+        group.id, start_date=start_date, end_date=end_date,
+    )
+    for cwe in cwes:
+        _process_calendar(
+            cwe,
+            google=google,
+            store=store,
+            profile_calendar_map=config.profile_calendar_mapping,
+            profiles_map=profiles_map,
+            fallback_google_calendar_id=config.fallback_google_calendar_id,
+            detect_missing_as_deleted=detect_missing_as_deleted,
+            report=report,
+        )
+
+    return _finalize(report, t0)
+
+
+def _finalize(report: SyncReport, t0: float) -> SyncReport:
+    report.duration_seconds = time.monotonic() - t0
+    report.completed_at = datetime.now(timezone.utc)
+    log.info(
+        "sync.done",
+        run_id=report.run_id,
+        inserts=report.inserts,
+        patches=report.patches,
+        deletes=report.deletes,
+        no_ops=report.no_ops,
+        skipped_external=report.skipped_external_calendar_events,
+        skipped_no_target=report.skipped_no_target_events,
+        errors=len(report.errors),
+        duration=report.duration_seconds,
+    )
+    return report
+
+
+def full_sync(
+    daely: DaelyClient,
+    google: GoogleClient,
+    store: Store,
+    config: BridgeConfig,
+) -> SyncReport:
+    """Full window scan with deletion detection via store-vs-snapshot diff."""
+    today = date.today()
+    return _run_sync(
+        daely, google, store, config,
+        start_date=today - timedelta(days=config.lookback_days),
+        end_date=today + timedelta(days=config.lookahead_days),
+        detect_missing_as_deleted=True,
+    )
+
+
+def incremental_sync(
+    daely: DaelyClient,
+    google: GoogleClient,
+    store: Store,
+    config: BridgeConfig,
+    *,
+    lookback_days: int = 1,
+    lookahead_days: int = 30,
+) -> SyncReport:
+    """Short-window incremental — relies on `deleted=true` flags only.
+
+    Long-term physical deletions are caught by the next full_sync.
+    """
+    today = date.today()
+    return _run_sync(
+        daely, google, store, config,
+        start_date=today - timedelta(days=lookback_days),
+        end_date=today + timedelta(days=lookahead_days),
+        detect_missing_as_deleted=False,
+    )
+
+
+__all__ = [
+    "SyncReport",
+    "full_sync",
+    "incremental_sync",
+]

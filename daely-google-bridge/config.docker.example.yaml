@@ -1,0 +1,41 @@
+# daely-google-bridge — Docker config template
+#
+# Copy to ./config.yaml next to docker-compose.yml.
+# Then run: docker compose run --rm --service-ports bootstrap
+# Then:     docker compose up -d
+
+# ─── Daely account ───────────────────────────────────────────────
+daely_email: you@example.com
+daely_min_pause_seconds: 1.0
+
+
+# ─── Google ──────────────────────────────────────────────────────
+# /secrets is the read-only volume; place google_oauth_client.json there.
+google_oauth_client_secrets_file: /secrets/google_oauth_client.json
+google_oauth_scopes:
+  - https://www.googleapis.com/auth/calendar
+
+
+# ─── Profile → Google sub-calendar mapping ──────────────────────
+# Bootstrap writes here. Empty {} until you run it.
+profile_calendar_mapping: {}
+
+# Optional: catch-all for events from un-profiled internal calendars.
+fallback_google_calendar_id: null
+
+
+# ─── Sync schedule ───────────────────────────────────────────────
+poll_interval_minutes: 15
+lookback_days: 30
+lookahead_days: 365
+
+
+# ─── Storage ─────────────────────────────────────────────────────
+# /data is the read-write volume; bridge.db lives there.
+db_path: /data/bridge.db
+
+
+# ─── Logging ─────────────────────────────────────────────────────
+log_level: INFO
+log_format: json   # docker logs --follow gives you JSON lines, easy to pipe to jq
+log_file: null     # null → stdout (so docker logs sees it)

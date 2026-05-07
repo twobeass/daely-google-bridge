@@ -1,0 +1,77 @@
+"""Bridge configuration — YAML-backed, pydantic-validated.
+
+Layout matches `config.example.yaml` at the repo root. The bootstrap CLI
+populates `profile_calendar_mapping` after creating Google sub-calendars.
+"""
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class BridgeConfig(BaseModel):
+    """Static configuration for one bridge instance.
+
+    Secrets (refresh tokens, access tokens) are NOT in this file — they live
+    in the SQLite store under the `tokens` table.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    # Daely
+    daely_email: str
+    daely_min_pause_seconds: float = 1.0
+
+    # Google
+    google_oauth_client_secrets_file: Path
+    google_oauth_scopes: list[str] = Field(
+        default_factory=lambda: ["https://www.googleapis.com/auth/calendar"],
+    )
+
+    # Profile → Google sub-calendar mapping
+    # key = Daely profile UUID; value = Google calendarId
+    profile_calendar_mapping: dict[str, str] = Field(default_factory=dict)
+    fallback_google_calendar_id: str | None = None
+
+    # Sync
+    poll_interval_minutes: int = 15
+    lookback_days: int = 30
+    lookahead_days: int = 365
+
+    # Storage
+    db_path: Path = Path("./bridge.db")
+
+    # Logging
+    log_level: str = "INFO"
+    log_format: str = "json"  # "json" or "text"
+    log_file: Path | None = None
+
+
+def load_config(path: Path | str) -> BridgeConfig:
+    """Read YAML and validate.
+
+    Raises ValueError if file is missing or malformed; pydantic ValidationError
+    propagates as-is on schema mismatch.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"config file not found: {p}")
+    raw = yaml.safe_load(p.read_text()) or {}
+    return BridgeConfig.model_validate(raw)
+
+
+def save_config(cfg: BridgeConfig, path: Path | str, *, backup: bool = True) -> None:
+    """Persist config to YAML.
+
+    If `backup=True` and the file already exists, the previous version is
+    preserved at `<path>.bak`. Bootstrap uses this when rewriting after
+    creating Google sub-calendars.
+    """
+    p = Path(path)
+    if backup and p.exists():
+        p.rename(p.with_suffix(p.suffix + ".bak"))
+    data = cfg.model_dump(mode="json", exclude_none=True)
+    p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+
+
+__all__ = ["BridgeConfig", "load_config", "save_config"]

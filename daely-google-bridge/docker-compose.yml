@@ -1,0 +1,64 @@
+# daely-google-bridge — production compose
+#
+# Two operating modes:
+#   docker compose up                          # default: long-running sync loop
+#   docker compose run --rm --service-ports bootstrap   # one-shot interactive bootstrap
+#
+# Layout:
+#   ./data/      ← bridge.db (RW, persists across restarts)
+#   ./secrets/   ← google_oauth_client.json (RO)
+#   ./config.yaml ← edited by you; populated by bootstrap
+
+services:
+  bridge:
+    build: .
+    image: daely-google-bridge:0.1
+    container_name: daely-google-bridge
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+    # Sync loop only — no inbound network needed for normal operation.
+    command: ["run"]
+    healthcheck:
+      # Liveness: process is up. (No HTTP server to ping; rely on cron-like cadence.)
+      test: ["CMD", "pgrep", "-f", "bridge"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  # One-shot bootstrap helper. Run with:
+  #   docker compose run --rm --service-ports bootstrap
+  # The --service-ports flag exposes the OAuth callback port (8080) only for
+  # this run, so SSH-tunnelled browsers can complete the consent flow.
+  bootstrap:
+    build: .
+    image: daely-google-bridge:0.1
+    profiles: ["bootstrap"]   # only invoked explicitly
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+      - ./config.yaml:/app/config.yaml
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - BRIDGE_OAUTH_HOST=0.0.0.0
+    ports:
+      - "8080:8080"
+    stdin_open: true
+    tty: true
+    command: ["bootstrap"]
+
+  # Convenience: `docker compose run --rm status`
+  status:
+    image: daely-google-bridge:0.1
+    profiles: ["ops"]
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+    command: ["status"]
