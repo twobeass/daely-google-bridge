@@ -719,6 +719,78 @@ def test_realtime_callback_only_triggers_on_calendar_events(tmp_path, capsys):
     assert scheduler_mock.add_job.call_count == add_job_count_before
 
 
+def test_realtime_trigger_runs_full_sync_not_incremental(tmp_path):
+    """Critical correctness: incremental_sync has detect_missing_as_deleted=False
+    and would silently miss physical deletes. Realtime triggers MUST use
+    full_sync to ensure deletions propagate."""
+    args = _build_run_args(tmp_path)
+
+    fake_daely = MagicMock()
+    fake_daely.access_token = "at"
+    fake_daely.get_me.return_value = MagicMock(id="u")
+    fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
+
+    captured_jobs = []
+
+    def _scheduler():
+        sched = MagicMock()
+        sched.start.side_effect = KeyboardInterrupt
+        # Capture each add_job invocation so we can dispatch the correct
+        # closure when we simulate a realtime trigger
+        def _record_add_job(func, *a, **kw):
+            captured_jobs.append((func, a, kw))
+        sched.add_job.side_effect = _record_add_job
+        return sched
+
+    captured_on_event = {}
+
+    def _rt_factory(cfg, daely, me, group, on_event):
+        captured_on_event["fn"] = on_event
+        return MagicMock()
+
+    full_sync_calls = {"count": 0}
+    incremental_calls = {"count": 0}
+
+    from daely_google_bridge.sync import SyncReport
+
+    def _full_sync(*a, **kw):
+        full_sync_calls["count"] += 1
+        return SyncReport()
+
+    def _incr_sync(*a, **kw):
+        incremental_calls["count"] += 1
+        return SyncReport()
+
+    cmd_run(
+        args,
+        daely_factory=lambda s, c: fake_daely,
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=_full_sync,
+        incremental_sync_fn=_incr_sync,
+        scheduler_factory=_scheduler,
+        realtime_client_factory=_rt_factory,
+    )
+
+    # The initial startup full_sync ran exactly once
+    assert full_sync_calls["count"] == 1
+
+    # Now simulate a realtime calendar event arriving
+    from daely_google_bridge.models import RealtimeEvent
+    captured_on_event["fn"](RealtimeEvent(subject="calendar/event"))
+
+    # The on_event callback scheduled a job via scheduler.add_job; the LAST
+    # captured job was that one
+    assert len(captured_jobs) >= 2  # at least: incremental interval + realtime-trigger
+    last_func, last_args, last_kwargs = captured_jobs[-1]
+    assert last_kwargs.get("id") == "realtime-trigger"
+
+    # Run the captured realtime job ourselves (mimicking what the scheduler
+    # would have done) and verify that full_sync was called, not incremental
+    last_func()
+    assert full_sync_calls["count"] == 2  # initial + realtime trigger
+    assert incremental_calls["count"] == 0  # never via realtime path
+
+
 def test_realtime_disabled_when_get_me_fails(tmp_path, capsys):
     """If we can't fetch user/group at startup, realtime stays off but
     the daemon still runs polling."""

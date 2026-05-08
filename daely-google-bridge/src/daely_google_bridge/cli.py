@@ -346,6 +346,11 @@ def cmd_run(
     google_b = google_factory or _build_google_client
     fsync = full_sync_fn or full_sync
     isync = incremental_sync_fn or incremental_sync
+    # Realtime triggers run a full_sync, not incremental — incremental has
+    # detect_missing_as_deleted=False, which would silently miss physical
+    # deletes. A push notification IS the rare event; we can afford the
+    # wider scan.
+    rsync = full_sync_fn or full_sync
 
     try:
         daely = daely_b(store, cfg)
@@ -408,6 +413,17 @@ def cmd_run(
         except Exception:
             log.exception("run.incremental_failed")
 
+    def _realtime_job() -> None:
+        """Triggered by realtime push. Uses full_sync so that physical
+        deletes (no `deleted=true` flag, just absence from the snapshot)
+        propagate to Google immediately."""
+        try:
+            r = rsync(daely, google, store, cfg)
+            state.update_from_report(r)
+            _print_report(r)
+        except Exception:
+            log.exception("run.realtime_sync_failed")
+
     scheduler.add_job(
         _job, "interval", minutes=cfg.poll_interval_minutes, id="incremental",
     )
@@ -419,7 +435,7 @@ def cmd_run(
     if cfg.realtime.enabled:
         realtime_client = _start_realtime_client(
             cfg=cfg, daely=daely, scheduler=scheduler,
-            isync_job=_job,
+            sync_job=_realtime_job,
             factory=realtime_client_factory,
         )
 
@@ -462,11 +478,14 @@ def _start_realtime_client(
     cfg: BridgeConfig,
     daely: DaelyClient,
     scheduler,  # noqa: ANN001  apscheduler.BlockingScheduler or compatible
-    isync_job: Callable[[], None],
+    sync_job: Callable[[], None],
     factory: Callable | None,
 ) -> RealtimeClient | None:
     """Build + start the RealtimeClient, wire its events to a debounced
-    incremental_sync trigger via the running scheduler.
+    sync trigger via the running scheduler.
+
+    `sync_job` should be the full_sync wrapper (not incremental) — physical
+    deletes are only caught by detect_missing_as_deleted=True.
 
     Returns the started client (or None if construction failed). Errors here
     don't kill the daemon — the polling loop is still running.
@@ -496,7 +515,7 @@ def _start_realtime_client(
         try:
             from datetime import datetime, timedelta
             scheduler.add_job(
-                isync_job,
+                sync_job,
                 "date",
                 run_date=datetime.now() + timedelta(seconds=debounce),
                 id="realtime-trigger",

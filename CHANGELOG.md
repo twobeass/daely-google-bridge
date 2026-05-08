@@ -12,6 +12,22 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.0.1] - 2026-05-08
+
+Patch — fixt Delete-Propagation bei Realtime-Triggern.
+
+### Behoben
+- **Realtime-Trigger machte `incremental_sync` statt `full_sync`** —
+  `incremental_sync` hat `detect_missing_as_deleted=False`, das heißt
+  physische Deletes (Daely entfernt das Event ganz aus der API, statt es
+  mit `deleted=true` zu flaggen) wurden silently übersprungen. Effekt
+  beim User: Termin auf dem Tablet gelöscht → blieb in Google.
+  Jetzt: Realtime-Trigger ruft `full_sync` mit Deletion-Detection.
+  Polling-Loop (alle 15min) bleibt auf `incremental_sync` (cheap), weil
+  ein nicht-realtime Daemon-Restart sowieso periodisch `full_sync` macht.
+- 1 neuer Regression-Test der explizit prüft dass der Realtime-Trigger
+  `full_sync_fn`, nicht `incremental_sync_fn` verwendet.
+
 ## [1.0.0] - 2026-05-08
 
 **Stable release.** Die Bridge ist feature-complete für ihren primären
@@ -191,7 +207,8 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.1
 [1.0.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.0
 [0.1.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.1
 [0.1.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.0
