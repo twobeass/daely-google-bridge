@@ -490,30 +490,34 @@ def _start_realtime_client(
     Returns the started client (or None if construction failed). Errors here
     don't kill the daemon — the polling loop is still running.
     """
-    # We need user_id + group_id for the SetFilter payload. Pull them once
-    # at startup; a stale id would just mean SetFilter targets the wrong
-    # subject space and we'd see no events — easy to spot.
-    #
-    # We ALSO pre-fetch the user's internal calendar UUIDs and pass them in
-    # the filter's `calendars` field. Empirically (v1.0.0/v1.0.1), an empty
-    # `calendars` list seems to silently disable subscription on the server
-    # side even with `subscribeUserCalendars=true` — passing the actual
-    # UUIDs is what the official Dart app does too.
+    # We need user_id + group_id for the SetFilter payload.
+    # The `calendars` whitelist behaviour depends on cfg.realtime.calendar_filter_mode:
+    #   - auto: send `None` (Dart-default, JSON null)
+    #   - internal-only: pre-fetch the user's internal calendars and pass UUIDs
+    #   - explicit: use cfg.realtime.calendar_uuids verbatim
     try:
         me = daely.get_me()
         groups = daely.get_my_groups()
         if not groups:
             raise RuntimeError("no Daely groups; can't subscribe")
         group = groups[0]
-        all_cals = daely.get_calendars(group.id)
-        # Only internal calendars (calendarType=0); the bridge doesn't
-        # care about externally-synced ones.
-        calendar_uuids = [c.id for c in all_cals if c.calendarType == 0]
+        mode = cfg.realtime.calendar_filter_mode
+        calendar_uuids: list[str] | None
+        if mode == "auto":
+            calendar_uuids = None
+        elif mode == "internal-only":
+            all_cals = daely.get_calendars(group.id)
+            calendar_uuids = [c.id for c in all_cals if c.calendarType == 0]
+        elif mode == "explicit":
+            calendar_uuids = list(cfg.realtime.calendar_uuids)
+        else:
+            calendar_uuids = None  # defensive
         log.info(
             "run.realtime_resolved_subscription",
             user_id=me.id[:8] + "…",
             group_id=group.id[:8] + "…",
-            internal_calendar_count=len(calendar_uuids),
+            calendar_filter_mode=mode,
+            calendar_count=(len(calendar_uuids) if calendar_uuids is not None else None),
         )
     except Exception as e:
         log.warning("run.realtime_disabled_fetch_failed", err=repr(e))

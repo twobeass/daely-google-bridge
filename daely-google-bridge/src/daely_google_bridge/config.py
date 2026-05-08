@@ -4,6 +4,7 @@ Layout matches `config.example.yaml` at the repo root. The bootstrap CLI
 populates `profile_calendar_mapping` after creating Google sub-calendars.
 """
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -77,6 +78,15 @@ class RealtimeConfig(BaseModel):
     subscribe_group_calendars: bool = True
     subscribe_chores: bool = False
     subscribe_checklists: bool = False
+    # `calendars` whitelist behaviour:
+    #   "auto"          → send `null` in JSON (no whitelist; subscribe per
+    #                     subscribe_user_calendars + subscribe_group_calendars
+    #                     booleans). Mirrors the Dart-app default.
+    #   "internal-only" → fetch the user's internal calendars at startup and
+    #                     pass the UUIDs as a whitelist.
+    #   "explicit"      → use the `calendar_uuids` list below verbatim.
+    calendar_filter_mode: Literal["auto", "internal-only", "explicit"] = "auto"
+    calendar_uuids: list[str] = Field(default_factory=list)
 
 
 class BridgeConfig(BaseModel):

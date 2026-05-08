@@ -791,35 +791,41 @@ def test_realtime_trigger_runs_full_sync_not_incremental(tmp_path):
     assert incremental_calls["count"] == 0  # never via realtime path
 
 
-def test_realtime_passes_internal_calendar_uuids_to_filter(tmp_path):
-    """v1.0.2 fix: empty `calendars: []` silently disables subscription on
-    the server. Bridge now pre-fetches the user's internal calendars and
-    passes their UUIDs as the filter context."""
-    args = _build_run_args(tmp_path)
+def test_realtime_internal_only_mode_pre_fetches_calendars(tmp_path):
+    """`calendar_filter_mode: internal-only` calls daely.get_calendars()."""
+    # Build args with explicit internal-only mode
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    cfg = BridgeConfig(
+        daely_email="t@example.com",
+        google_oauth_client_secrets_file=secrets,
+        db_path=tmp_path / "bridge.db",
+        log_format="text",
+        realtime={
+            "enabled": True,
+            "debounce_seconds": 0.5,
+            "calendar_filter_mode": "internal-only",
+        },
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.once = False
 
     fake_daely = MagicMock()
     fake_daely.access_token = "at"
     fake_daely.get_me.return_value = MagicMock(id="u")
     fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
-    cal_internal_1 = MagicMock(id="cal-internal-1", calendarType=0)
-    cal_internal_2 = MagicMock(id="cal-internal-2", calendarType=0)
-    cal_external = MagicMock(id="cal-external", calendarType=1)
-    fake_daely.get_calendars.return_value = [
-        cal_internal_1, cal_internal_2, cal_external,
-    ]
+    cal_internal = MagicMock(id="cal-internal-1", calendarType=0)
+    fake_daely.get_calendars.return_value = [cal_internal]
 
-    captured = {}
+    captured = {"factory_called": False}
 
     def _rt_factory(cfg, daely, me, group, on_event):
-        # Look up daely.get_calendars() side-effect ourselves to verify
-        # cli.py actually called it before invoking us
-        captured["realtime_called"] = True
-        # cli.py passes us the resolved (me, group) — fetch happened
+        captured["factory_called"] = True
         return MagicMock()
 
-    # We can't easily intercept the calendar_uuids through the factory
-    # signature, so verify via daely.get_calendars being called with the
-    # right group_id.
     scheduler_mock = MagicMock()
     scheduler_mock.start.side_effect = KeyboardInterrupt
 
@@ -834,10 +840,37 @@ def test_realtime_passes_internal_calendar_uuids_to_filter(tmp_path):
         realtime_client_factory=_rt_factory,
     )
 
-    # cli.py must have called daely.get_calendars(group.id) before
-    # constructing the RealtimeClient
     fake_daely.get_calendars.assert_called_once_with("g")
-    assert captured["realtime_called"] is True
+    assert captured["factory_called"] is True
+
+
+def test_realtime_auto_mode_does_not_fetch_calendars(tmp_path):
+    """`calendar_filter_mode: auto` (default) skips the calendar pre-fetch."""
+    args = _build_run_args(tmp_path)  # default mode is "auto"
+
+    fake_daely = MagicMock()
+    fake_daely.access_token = "at"
+    fake_daely.get_me.return_value = MagicMock(id="u")
+    fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
+
+    def _rt_factory(cfg, daely, me, group, on_event):
+        return MagicMock()
+
+    scheduler_mock = MagicMock()
+    scheduler_mock.start.side_effect = KeyboardInterrupt
+
+    from daely_google_bridge.sync import SyncReport
+    cmd_run(
+        args,
+        daely_factory=lambda s, c: fake_daely,
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=MagicMock(return_value=SyncReport()),
+        incremental_sync_fn=MagicMock(),
+        scheduler_factory=lambda: scheduler_mock,
+        realtime_client_factory=_rt_factory,
+    )
+
+    fake_daely.get_calendars.assert_not_called()
 
 
 def test_realtime_calendars_filter_is_internal_only():

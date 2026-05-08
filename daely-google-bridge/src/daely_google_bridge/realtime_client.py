@@ -67,23 +67,34 @@ class RealtimeFilter:
 
     Mirrors the Dart `RealtimeFilter` model bit-for-bit, including the
     `calendars` whitelist field.
+
+    `calendars=None` is the Dart-default state ("no explicit whitelist —
+    use the boolean toggles only"). An empty list `[]` means "explicitly
+    no calendars" — empirically this disables subscription on the
+    server side. A non-empty list is a whitelist of specific UUIDs.
     """
     user: str
     group: str
     subscribe_user_calendars: bool = True
     subscribe_group_calendars: bool = True
-    calendars: list[str] = field(default_factory=list)
+    calendars: list[str] | None = None
     subscribe_chores: bool = False
     subscribe_checklists: bool = False
 
     def to_json(self) -> dict:
-        """Wire-format JSON exactly matching the Dart toJson order."""
+        """Wire-format JSON exactly matching the Dart toJson order.
+
+        `calendars` is emitted as `null` when our list is None (Dart
+        default), or as a JSON array when set explicitly.
+        """
         return {
             "user": self.user,
             "group": self.group,
             "subscribeUserCalendars": self.subscribe_user_calendars,
             "subscribeGroupCalendars": self.subscribe_group_calendars,
-            "calendars": list(self.calendars),
+            "calendars": (
+                list(self.calendars) if self.calendars is not None else None
+            ),
             "subscribeChores": self.subscribe_chores,
             "subscribeChecklists": self.subscribe_checklists,
         }
@@ -136,7 +147,7 @@ class RealtimeClient:
         subscribe_group_calendars: bool = True,
         subscribe_chores: bool = False,
         subscribe_checklists: bool = False,
-        calendars: list[str] | None = None,
+        calendars: list[str] | None = None,  # None → JSON null (subscribe per booleans, no whitelist)
         connect_timeout: float = 10.0,
         write_timeout: float = 10.0,
         # Injectable for tests
@@ -150,7 +161,7 @@ class RealtimeClient:
             user=user_id, group=group_id,
             subscribe_user_calendars=subscribe_user_calendars,
             subscribe_group_calendars=subscribe_group_calendars,
-            calendars=calendars or [],
+            calendars=calendars,  # pass through; None means "no whitelist"
             subscribe_chores=subscribe_chores,
             subscribe_checklists=subscribe_checklists,
         )
@@ -434,21 +445,30 @@ class RealtimeClient:
     def _post_set_filter(
         self, client: httpx.Client, url: str, access_token: str,
     ) -> None:
+        filter_json = self._filter.to_json()
         invoke = {
             "type": _TYPE_INVOCATION,
             "invocationId": "1",
             "target": "SetFilter",
-            "arguments": [self._filter.to_json()],
+            "arguments": [filter_json],
         }
         body = json.dumps(invoke, separators=(",", ":")).encode("utf-8") + _RS
         self._post_message(client, url, access_token, body, label="SetFilter")
-        log.info(
-            "realtime.set_filter_sent",
-            user=self._filter.user[:8] + "…",
-            group=self._filter.group[:8] + "…",
-            user_calendars=self._filter.subscribe_user_calendars,
-            group_calendars=self._filter.subscribe_group_calendars,
-        )
+        # Log the FULL filter JSON shape (with UUIDs truncated to 8 chars
+        # for log readability — full UUIDs aren't logs-PII because they're
+        # the user's own ids). This is the single most important diagnostic
+        # when subscriptions look accepted but no notifications arrive.
+        truncated = dict(filter_json)
+        for k in ("user", "group"):
+            v = truncated.get(k)
+            if isinstance(v, str) and len(v) >= 12:
+                truncated[k] = v[:8] + "…"
+        if isinstance(truncated.get("calendars"), list):
+            truncated["calendars"] = [
+                (c[:8] + "…") if isinstance(c, str) and len(c) >= 12 else c
+                for c in truncated["calendars"]
+            ]
+        log.info("realtime.set_filter_sent", filter=truncated)
 
     # ─────────────────── parsing ───────────────────
 

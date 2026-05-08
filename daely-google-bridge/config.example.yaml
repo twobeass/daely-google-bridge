@@ -80,8 +80,12 @@ health_server:
 # sync within seconds of each calendar change — replacing the 15-minute
 # poll latency. Polling stays active as a safety net.
 #
-# Subscribes to user + group calendar topics by default (chores/checklists
-# are off — the bridge doesn't sync those).
+# `calendar_filter_mode`:
+#   "auto"           → don't whitelist; subscribe per the boolean toggles
+#                      (mirrors the Dart-app default; recommended)
+#   "internal-only"  → fetch and whitelist the user's internal calendars
+#                      (calendarType=0)
+#   "explicit"       → use `calendar_uuids` below verbatim
 realtime:
   enabled: false
   debounce_seconds: 2.0
@@ -89,6 +93,8 @@ realtime:
   subscribe_group_calendars: true
   subscribe_chores: false
   subscribe_checklists: false
+  calendar_filter_mode: auto
+  calendar_uuids: []
 
 
 # ─── Storage ─────────────────────────────────────────────────────

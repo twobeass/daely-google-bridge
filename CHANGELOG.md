@@ -12,6 +12,28 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.0.3] - 2026-05-08
+
+Patch — testet die dritte Hypothese zum `calendars`-Filter-Feld
+(`null` statt `[]` oder konkreter Liste) + macht das gesendete
+Filter-JSON sichtbar im Log.
+
+### Geändert
+- **Default-Filter ist jetzt `calendars: null`** (Dart-Default-Verhalten:
+  "kein Whitelist, subscribe nach den Boolean-Toggles"). Wenn das die
+  korrekte Form ist, sollten auf einmal Notifications fließen.
+- Neuer Config-Knopf `realtime.calendar_filter_mode`:
+  - `"auto"` (default) — sendet `null`
+  - `"internal-only"` — wie v1.0.2, fetcht User-Kalender und whitelistet sie
+  - `"explicit"` — nutzt `realtime.calendar_uuids` als Liste verbatim
+- `realtime.set_filter_sent` loggt jetzt das **vollständige Filter-JSON**
+  (mit UUIDs auf 8 Zeichen gekürzt für Log-Übersicht). Damit kann ein
+  Operator/Debugger den exakten Wire-Inhalt sehen ohne mit tcpdump zu
+  hantieren.
+- 1 neuer Test (auto-mode skippt get_calendars-Call), 1 neuer Test
+  (internal-only-mode triggert es), 1 angepasster Test (calendars
+  default ist None nicht []).
+
 ## [1.0.2] - 2026-05-08
 
 Patch — fixt Realtime-Filter (Server fired keine Notifications mit
@@ -233,7 +255,8 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.3
 [1.0.2]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.2
 [1.0.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.1
 [1.0.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.0

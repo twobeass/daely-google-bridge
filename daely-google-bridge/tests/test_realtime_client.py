@@ -159,8 +159,18 @@ def test_filter_to_json_field_order():
     ]
 
 
-def test_filter_calendars_defaults_to_empty_list():
+def test_filter_calendars_defaults_to_null():
+    """Dart-default behaviour: calendars unset → JSON `null`. Empirically
+    `[]` disables subscription server-side even with subscribe* booleans
+    set."""
     f = RealtimeFilter(user="u", group="g")
+    assert f.to_json()["calendars"] is None
+
+
+def test_filter_calendars_explicit_empty_list_serializes_as_empty_list():
+    """If a caller explicitly passes [], we honour it (even though the
+    server treats it as 'subscribe to nothing')."""
+    f = RealtimeFilter(user="u", group="g", calendars=[])
     assert f.to_json()["calendars"] == []
 
 
