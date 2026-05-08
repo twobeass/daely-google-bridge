@@ -21,6 +21,42 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 - `release.yml` GitHub-Action: bei Push eines `v*`-Tags automatisches GitHub-
   Release mit auto-generierten Notes.
 - Diese `CHANGELOG.md`.
+- **Schema v2** (Migration v2): drei neue Spalten auf `event_mapping`
+  (`retry_after`, `retry_count`, `last_error`) + neue Tabelle `sync_history`
+  als Audit-Log abgeschlossener Sync-Cycles.
+- **Retry-Loop** für `failed=true`-Mappings: nach einem Patch-/Delete-Fehler
+  wird der nächste Versuch exponentiell zurückgehalten (Default: 60s
+  verdoppelnd, gedeckelt auf 1h). In der Cooldown-Zeit wird das Event
+  übersprungen statt erneut gegen Google zu hämmern. Erfolgreiche Re-Patches
+  setzen den Retry-Zustand automatisch zurück. Skip-Counter im `SyncReport`:
+  `skipped_retry_cooldown`.
+- **`bridge resync`** als echter Command (war Stub):
+  `bridge resync [--calendar <daely_id>] [--dry-run]`. Setzt
+  `last_seen_updated=NULL` auf den passenden Mapping-Rows, damit die nächste
+  Sync-Runde sie mit aktueller Mapper-Output (z. B. neuen Farben) re-patcht.
+- **`bridge re-color`** als Convenience-Alias für `bridge resync` über alle
+  Calendars — discoverable Shortcut nach Profil-Color-Config-Änderungen.
+- **Sync-History-Persistenz**: jeder Sync-Cycle schreibt eine Zeile in die
+  neue `sync_history`-Tabelle. Auto-Pruning hält die letzten 500 Einträge.
+  `Store.recent_sync_history(limit)` und `prune_sync_history(keep_last)` für
+  Diagnose und Maintenance.
+- **§1.4 Health-Check-HTTP-Endpoint** (opt-in, default off):
+  - `GET /healthz` — 200 wenn letzter Sync innerhalb von `poll_interval × 2 + 60s`
+  - `GET /readyz` — 200 wenn beide Refresh-Tokens (Daely + Google) im Store
+  - `GET /status` — JSON mit Schema-Version, Mapping-Counts, letzten 10
+    History-Einträgen
+  - Bind default `127.0.0.1:8090`, in Config konfigurierbar (`health_server`-
+    Sektion). Server läuft als Daemon-Thread parallel zum Sync-Loop.
+- `BridgeState`-Object in `health_server.py` als Thread-safe Snapshot
+  zwischen Sync-Loop und Health-Endpoint.
+
+### Geändert
+- `Store(...)` öffnet die SQLite-Connection mit `check_same_thread=False`,
+  damit der Health-Server (worker threads) lesend auf den gleichen Store
+  zugreifen kann. Writer bleibt der Sync-Loop (Single-Thread); SQLite WAL
+  serialisiert konkurrente Schreiber sowieso.
+- `SyncReport` hat ein neues Feld `skipped_retry_cooldown: int` — nicht
+  breaking, ist Dataclass mit Default 0.
 
 ## [0.1.0] - 2026-05-08
 

@@ -52,6 +52,17 @@ lookback_days: 30
 lookahead_days: 365
 
 
+# ─── Health-Check HTTP server ────────────────────────────────────
+# Off by default. To enable Docker HEALTHCHECK + external monitoring:
+#   1. set enabled: true and bind_host: 0.0.0.0
+#   2. expose port 8090 in docker-compose.yml (ports: ["8090:8090"])
+#   3. or call from another container on the same Docker network
+health_server:
+  enabled: false
+  bind_host: 127.0.0.1
+  bind_port: 8090
+
+
 # ─── Storage ─────────────────────────────────────────────────────
 # /data is the read-write volume; bridge.db lives there.
 db_path: /data/bridge.db

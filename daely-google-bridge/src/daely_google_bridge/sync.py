@@ -51,6 +51,10 @@ class SyncReport:
 
     `errors` is a list of (daely_id, message) tuples. The daely_id is empty
     for non-event-scoped failures (e.g. "no groups").
+
+    `skipped_retry_cooldown` counts events whose mapping is in the failed-retry
+    cooldown — they were observed in the snapshot but skipped to avoid hammering
+    Google with predictably-failing patches.
     """
     inserts: int = 0
     patches: int = 0
@@ -58,6 +62,7 @@ class SyncReport:
     no_ops: int = 0
     skipped_external_calendar_events: int = 0
     skipped_no_target_events: int = 0
+    skipped_retry_cooldown: int = 0
     errors: list[tuple[str, str]] = field(default_factory=list)
     duration_seconds: float = 0.0
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -75,6 +80,7 @@ class SyncReport:
             f"deletes={self.deletes} no_ops={self.no_ops} "
             f"skip_external={self.skipped_external_calendar_events} "
             f"skip_no_target={self.skipped_no_target_events} "
+            f"skip_retry_cooldown={self.skipped_retry_cooldown} "
             f"errors={len(self.errors)} duration={self.duration_seconds:.2f}s)"
         )
 
@@ -99,6 +105,17 @@ def _delete_via_google(
     store: Store,
     report: SyncReport,
 ) -> None:
+    # Honour retry cooldown for previously-failed mappings.
+    now = datetime.now(timezone.utc)
+    if mapping.failed and mapping.retry_after and mapping.retry_after > now:
+        report.skipped_retry_cooldown += 1
+        log.debug(
+            "sync.delete.retry_cooldown",
+            run_id=report.run_id,
+            daely_id=mapping.daely_id,
+            retry_after=mapping.retry_after.isoformat(),
+        )
+        return
     try:
         google.delete_event(mapping.google_calendar_id, mapping.google_event_id)
         store.delete_event_mapping(mapping.daely_id)
@@ -112,6 +129,7 @@ def _delete_via_google(
     except Exception as e:
         msg = f"delete: {e!r}"
         report.errors.append((mapping.daely_id, msg))
+        store.record_event_error(mapping.daely_id, error_msg=msg)
         log.warning(
             "sync.delete.error",
             run_id=report.run_id,
@@ -158,7 +176,8 @@ def _process_event(
 
     existing = store.get_event_mapping(daely_id)
     if existing is None:
-        # Insert
+        # Insert. Insert-failures aren't tracked in the retry-cooldown system;
+        # they retry naturally on the next cycle (no mapping row exists).
         try:
             response = google.insert_event(google_calendar_id, body)
             store.put_event_mapping(
@@ -184,8 +203,23 @@ def _process_event(
             )
         return
 
-    # Mapping exists — patch only if the event has actually changed in Daely.
-    if existing.last_seen_updated == event.updated:
+    # Mapping exists. Honour retry cooldown for previously-failed events
+    # so we don't hammer Google with the same predictable failure.
+    now = datetime.now(timezone.utc)
+    if existing.failed and existing.retry_after and existing.retry_after > now:
+        report.skipped_retry_cooldown += 1
+        log.debug(
+            "sync.patch.retry_cooldown",
+            run_id=report.run_id,
+            daely_id=daely_id,
+            retry_count=existing.retry_count,
+            retry_after=existing.retry_after.isoformat(),
+        )
+        return
+
+    # No-op only if there's nothing to change AND no failure pending. A
+    # cooldown-elapsed failed mapping falls through to a retry below.
+    if existing.last_seen_updated == event.updated and not existing.failed:
         report.no_ops += 1
         return
 
@@ -193,6 +227,8 @@ def _process_event(
         google.patch_event(
             existing.google_calendar_id, existing.google_event_id, body,
         )
+        # Successful patch clears any prior failure state via put_event_mapping
+        # defaults (failed=False, retry_count=0, retry_after=None, last_error=None).
         store.put_event_mapping(
             daely_id=daely_id,
             daely_calendar_id=daely_calendar.id,
@@ -206,13 +242,16 @@ def _process_event(
             run_id=report.run_id,
             daely_id=daely_id,
             google_event_id=existing.google_event_id,
+            recovered_from_failure=existing.failed,
         )
     except Exception as e:
         msg = f"patch: {e!r}"
         report.errors.append((daely_id, msg))
+        store.record_event_error(daely_id, error_msg=msg)
         log.warning(
             "sync.patch.error",
-            run_id=report.run_id, daely_id=daely_id, err=msg,
+            run_id=report.run_id, daely_id=daely_id,
+            retry_count=existing.retry_count + 1, err=msg,
         )
 
 
@@ -298,7 +337,7 @@ def _run_sync(
     groups = daely.get_my_groups()
     if not groups:
         report.errors.append(("", "no Daely groups returned"))
-        return _finalize(report, t0)
+        return _finalize(report, t0, store=store)
     group = groups[0]
 
     # Phase 3e/3f: load profiles once per cycle. Footer (3e) needs the names;
@@ -338,10 +377,10 @@ def _run_sync(
             report=report,
         )
 
-    return _finalize(report, t0)
+    return _finalize(report, t0, store=store)
 
 
-def _finalize(report: SyncReport, t0: float) -> SyncReport:
+def _finalize(report: SyncReport, t0: float, *, store: Store | None = None) -> SyncReport:
     report.duration_seconds = time.monotonic() - t0
     report.completed_at = datetime.now(timezone.utc)
     log.info(
@@ -353,9 +392,30 @@ def _finalize(report: SyncReport, t0: float) -> SyncReport:
         no_ops=report.no_ops,
         skipped_external=report.skipped_external_calendar_events,
         skipped_no_target=report.skipped_no_target_events,
+        skipped_retry_cooldown=report.skipped_retry_cooldown,
         errors=len(report.errors),
         duration=report.duration_seconds,
     )
+    # Persist sync_history row + prune to keep table bounded. Best-effort:
+    # a store error here doesn't poison an otherwise-successful sync.
+    if store is not None:
+        try:
+            store.record_sync_history(
+                run_id=report.run_id,
+                started_at=report.started_at,
+                completed_at=report.completed_at,
+                duration_seconds=report.duration_seconds,
+                inserts=report.inserts,
+                patches=report.patches,
+                deletes=report.deletes,
+                no_ops=report.no_ops,
+                skipped_external=report.skipped_external_calendar_events,
+                skipped_no_target=report.skipped_no_target_events,
+                errors=report.errors,
+            )
+            store.prune_sync_history(keep_last=500)
+        except Exception:
+            log.exception("sync.history_record_failed", run_id=report.run_id)
     return report
 
 

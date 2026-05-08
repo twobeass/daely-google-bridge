@@ -402,6 +402,161 @@ def test_full_sync_isolates_delete_errors_continues_inserts(store):
     assert store.get_event_mapping("ev-gone") is not None
 
 
+# ─────────────── retry-loop (§1.2) ───────────────
+
+def test_failed_patch_records_retry_state(store):
+    """A patch error must populate retry_count + retry_after on the mapping."""
+    seen = datetime(2026, 4, 27, 18, 37, 31, tzinfo=timezone.utc)
+    store.put_event_mapping(
+        daely_id="ev-1", daely_calendar_id="daely-cal-1",
+        google_event_id="g-1", google_calendar_id=GOOGLE_CAL_A,
+        last_seen_updated=seen,
+    )
+    # Daely now reports the event with a newer `updated` → bridge will try patch.
+    newer = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+    cwes = [_calendar_with_events(events=[_event(id="ev-1", updated=newer)])]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+    google.patch_event.side_effect = RuntimeError("google-403")
+
+    report = full_sync(daely, google, store, _config())
+    assert report.patches == 0
+    assert len(report.errors) == 1
+
+    m = store.get_event_mapping("ev-1")
+    assert m.failed is True
+    assert m.retry_count == 1
+    assert m.retry_after is not None
+    assert "google-403" in (m.last_error or "")
+
+
+def test_failed_event_in_cooldown_is_skipped(store):
+    """A mapping with retry_after in the future is not patched again."""
+    seen = datetime(2026, 4, 27, 18, 37, 31, tzinfo=timezone.utc)
+    far_future = datetime.now(timezone.utc) + datetime.now(timezone.utc).resolution * 0
+    # Use timedelta safely
+    from datetime import timedelta
+    far_future = datetime.now(timezone.utc) + timedelta(hours=1)
+    store.put_event_mapping(
+        daely_id="ev-1", daely_calendar_id="daely-cal-1",
+        google_event_id="g-1", google_calendar_id=GOOGLE_CAL_A,
+        last_seen_updated=seen,
+        failed=True, retry_count=3, retry_after=far_future,
+        last_error="prior failure",
+    )
+    newer = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+    cwes = [_calendar_with_events(events=[_event(id="ev-1", updated=newer)])]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+
+    report = full_sync(daely, google, store, _config())
+    assert report.patches == 0
+    assert report.skipped_retry_cooldown == 1
+    google.patch_event.assert_not_called()
+    # Retry state preserved
+    m = store.get_event_mapping("ev-1")
+    assert m.failed is True
+    assert m.retry_count == 3
+
+
+def test_successful_retry_clears_failure_state(store):
+    """When the cooldown elapses and the patch succeeds, retry state resets."""
+    from datetime import timedelta
+    seen = datetime(2026, 4, 27, 18, 37, 31, tzinfo=timezone.utc)
+    elapsed = datetime.now(timezone.utc) - timedelta(minutes=1)  # cooldown over
+    store.put_event_mapping(
+        daely_id="ev-1", daely_calendar_id="daely-cal-1",
+        google_event_id="g-1", google_calendar_id=GOOGLE_CAL_A,
+        last_seen_updated=seen,
+        failed=True, retry_count=2, retry_after=elapsed,
+        last_error="temporarily down",
+    )
+    # Even though the Daely event hasn't actually changed, the bridge still
+    # retries because failed=True takes precedence over the no-op shortcut.
+    cwes = [_calendar_with_events(events=[_event(id="ev-1", updated=seen)])]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+
+    report = full_sync(daely, google, store, _config())
+    assert report.patches == 1
+    google.patch_event.assert_called_once()
+
+    m = store.get_event_mapping("ev-1")
+    assert m.failed is False
+    assert m.retry_count == 0
+    assert m.retry_after is None
+    assert m.last_error is None
+
+
+def test_failed_delete_records_retry_state(store):
+    """Delete errors also populate retry state (cooldown applies to either op)."""
+    store.put_event_mapping(
+        daely_id="ev-gone", daely_calendar_id="daely-cal-1",
+        google_event_id="g-gone", google_calendar_id=GOOGLE_CAL_A,
+    )
+    cwes = [_calendar_with_events(events=[])]  # event missing → triggers delete
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+    google.delete_event.side_effect = RuntimeError("can't reach google")
+
+    report = full_sync(daely, google, store, _config())
+    assert report.deletes == 0
+    assert len(report.errors) == 1
+
+    m = store.get_event_mapping("ev-gone")
+    assert m is not None  # mapping kept for retry
+    assert m.failed is True
+    assert m.retry_count == 1
+    assert m.retry_after is not None
+
+
+# ─────────────── sync_history persistence (§10.1) ───────────────
+
+def test_sync_history_persisted_after_full_sync(store):
+    cwes = [_calendar_with_events(events=[_event(id="ev-1")])]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+
+    report = full_sync(daely, google, store, _config())
+
+    history = store.recent_sync_history()
+    assert len(history) == 1
+    h = history[0]
+    assert h.run_id == report.run_id
+    assert h.inserts == report.inserts
+    assert h.errors_count == 0
+
+
+def test_sync_history_records_errors(store):
+    cwes = [_calendar_with_events(events=[_event(id="ev-fail")])]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+    google.insert_event.side_effect = RuntimeError("oh no")
+
+    report = full_sync(daely, google, store, _config())
+    assert len(report.errors) == 1
+
+    history = store.recent_sync_history()
+    assert len(history) == 1
+    assert history[0].errors_count == 1
+    assert history[0].errors[0][0] == "ev-fail"
+    assert "oh no" in history[0].errors[0][1]
+
+
+def test_sync_history_persisted_even_when_no_groups(store):
+    """Aborted-at-top syncs still get a history row for diagnostic visibility."""
+    daely = MagicMock()
+    daely.get_my_groups.return_value = []
+    google = _google_mock()
+
+    full_sync(daely, google, store, _config())
+
+    history = store.recent_sync_history()
+    assert len(history) == 1
+    assert history[0].errors_count == 1
+    assert "no Daely groups" in history[0].errors[0][1]
+
+
 # ─────────────── no groups ───────────────
 
 def test_full_sync_no_groups_returns_error_in_report(store):

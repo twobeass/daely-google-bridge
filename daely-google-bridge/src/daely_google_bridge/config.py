@@ -38,6 +38,21 @@ class ColorMappingConfig(BaseModel):
         return v
 
 
+class HealthServerConfig(BaseModel):
+    """Tiny HTTP server exposing /healthz, /readyz, /status.
+
+    Disabled by default for backwards compatibility — set `enabled: true`
+    to opt in. Bind defaults to localhost; widen to "0.0.0.0" only behind
+    a reverse proxy or firewall.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = False
+    bind_host: str = "127.0.0.1"
+    bind_port: int = Field(default=8090, ge=1024, le=65535)
+
+
 class BridgeConfig(BaseModel):
     """Static configuration for one bridge instance.
 
@@ -76,6 +91,9 @@ class BridgeConfig(BaseModel):
 
     # Profile-color → Google colorId mapping (auto-match + per-profile overrides).
     color_mapping: ColorMappingConfig = Field(default_factory=ColorMappingConfig)
+
+    # Health-check HTTP server (off by default).
+    health_server: HealthServerConfig = Field(default_factory=HealthServerConfig)
 
     # Sync
     poll_interval_minutes: int = 15
@@ -130,4 +148,7 @@ def save_config(cfg: BridgeConfig, path: Path | str, *, backup: bool = True) -> 
     p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
-__all__ = ["BridgeConfig", "ColorMappingConfig", "load_config", "save_config"]
+__all__ = [
+    "BridgeConfig", "ColorMappingConfig", "HealthServerConfig",
+    "load_config", "save_config",
+]

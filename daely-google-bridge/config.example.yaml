@@ -63,6 +63,17 @@ lookback_days: 30
 lookahead_days: 365
 
 
+# ─── Health-Check HTTP server ────────────────────────────────────
+# Tiny stdlib server exposing /healthz, /readyz, /status while `bridge run`
+# is alive. Useful for Docker HEALTHCHECK + uptime monitoring.
+# Default off; set enabled: true to activate. Bind defaults to localhost —
+# widen bind_host to 0.0.0.0 only behind a reverse proxy or firewall.
+health_server:
+  enabled: false
+  bind_host: 127.0.0.1
+  bind_port: 8090
+
+
 # ─── Storage ─────────────────────────────────────────────────────
 db_path: ./bridge.db
 

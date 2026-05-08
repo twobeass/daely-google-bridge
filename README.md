@@ -276,18 +276,46 @@ docker compose up -d
 
 Wenn ein Update das **Format** der gespiegelten Events ändert (z. B. neue
 Profil-Farben, anderer Footer), bekommt die Bridge das von alleine **nicht**
-mit — sie patcht ein Event nur, wenn Daely es geändert hat. Damit deine
-Bestandsevents sofort die neue Optik bekommen:
+mit — sie patcht ein Event nur, wenn Daely es geändert hat. Dafür gibt's
+zwei Convenience-Commands:
 
 ```bash
-# Bridge stoppen, einmalig den Patch-Trigger reseten, neu starten
-docker compose stop bridge
-sqlite3 ./data/bridge.db "UPDATE event_mapping SET last_seen_updated = NULL;"
-docker compose start bridge
+# Alles re-patchen (z. B. nach einem Color-Mapping-Update):
+docker compose exec bridge bridge re-color --dry-run   # vorher prüfen
+docker compose exec bridge bridge re-color             # tatsächlich anwenden
+docker compose restart bridge
+
+# Nur einen einzelnen Daely-Calendar:
+docker compose exec bridge bridge resync --calendar <daely-calendar-uuid>
 ```
 
-Beim nächsten Sync sieht die Bridge alle Events als „verändert" und
-re-patched sie mit der neuen Logik — am Inhalt selbst ändert sich nichts.
+Beide Befehle setzen `last_seen_updated=NULL` auf den passenden Mapping-Rows
+in `bridge.db`. Beim nächsten Sync-Cycle sieht die Bridge die Events als
+„verändert" und re-patcht sie mit der aktuellen Mapper-Logik — am Inhalt
+ändert sich nichts.
+
+> Falls die Bridge im `--once`-Modus läuft (kein laufender Daemon-Container),
+> kann das gleiche per direktem CLI-Aufruf passieren:
+> `docker compose run --rm bridge bridge re-color`.
+
+### Optional: Health-Endpoint aktivieren
+
+Für Docker-`HEALTHCHECK`-Direktive oder externe Uptime-Monitore (Healthchecks.io,
+Uptime-Kuma) liefert die Bridge `/healthz`, `/readyz` und `/status`-Endpoints
+unter einem winzigen lokalen HTTP-Server. Default aus; aktivieren in der
+`config.yaml`:
+
+```yaml
+health_server:
+  enabled: true
+  bind_host: 127.0.0.1   # oder 0.0.0.0 hinter einem Proxy
+  bind_port: 8090
+```
+
+`/healthz` ist 200 wenn der letzte Sync innerhalb von `poll_interval × 2 + 60s`
+liegt, sonst 503. `/readyz` ist 200 wenn beide Refresh-Tokens (Daely + Google)
+in der DB stehen. `/status` liefert JSON mit Schema-Version, Mapping-Counts
+und den letzten 10 Sync-History-Einträgen.
 
 ## Selbst aus dem Source bauen (nur für Contributors)
 

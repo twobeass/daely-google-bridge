@@ -149,13 +149,157 @@ def test_run_no_daely_token_returns_1(tmp_path, capsys):
     assert "bootstrap" in err.lower()
 
 
-def test_resync_command_is_stub(capsys):
+def _resync_fixture(tmp_path):
+    """Build a config + Store with sample mappings; return (config_path, db_path)."""
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    cfg = BridgeConfig(
+        daely_email="t@example.com",
+        google_oauth_client_secrets_file=secrets,
+        db_path=tmp_path / "bridge.db",
+        log_format="text",
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+
+    from datetime import datetime, timezone
+    s = Store(cfg.db_path)
+    seen = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
+    s.put_event_mapping(
+        daely_id="d1", daely_calendar_id="cal-A",
+        google_event_id="g1", google_calendar_id="gcal-A",
+        last_seen_updated=seen,
+    )
+    s.put_event_mapping(
+        daely_id="d2", daely_calendar_id="cal-A",
+        google_event_id="g2", google_calendar_id="gcal-A",
+        last_seen_updated=seen,
+    )
+    s.put_event_mapping(
+        daely_id="d3", daely_calendar_id="cal-B",
+        google_event_id="g3", google_calendar_id="gcal-B",
+        last_seen_updated=seen,
+    )
+    s.close()
+    return config_path, cfg.db_path
+
+
+def test_resync_without_config_returns_1(tmp_path, capsys):
     args = MagicMock()
-    args.calendar_id = "cal-x"
+    args.config = str(tmp_path / "missing.yaml")
+    args.calendar = None
+    args.dry_run = False
+    rc = cmd_resync(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "bootstrap" in err.lower()
+
+
+def test_resync_all_calendars_resets_every_mapping(tmp_path, capsys):
+    config_path, db_path = _resync_fixture(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.calendar = None
+    args.dry_run = False
+
     rc = cmd_resync(args)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "cal-x" in out
+    assert "reset 3 mapping" in out
+
+    s = Store(db_path)
+    try:
+        for daely_id in ("d1", "d2", "d3"):
+            assert s.get_event_mapping(daely_id).last_seen_updated is None
+    finally:
+        s.close()
+
+
+def test_resync_filtered_by_calendar_only_resets_that_one(tmp_path, capsys):
+    config_path, db_path = _resync_fixture(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.calendar = "cal-A"
+    args.dry_run = False
+
+    rc = cmd_resync(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "reset 2 mapping" in out
+    assert "cal-A" in out
+
+    s = Store(db_path)
+    try:
+        # cal-A rows reset
+        assert s.get_event_mapping("d1").last_seen_updated is None
+        assert s.get_event_mapping("d2").last_seen_updated is None
+        # cal-B row untouched
+        assert s.get_event_mapping("d3").last_seen_updated is not None
+    finally:
+        s.close()
+
+
+def test_resync_dry_run_does_not_modify_db(tmp_path, capsys):
+    config_path, db_path = _resync_fixture(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.calendar = None
+    args.dry_run = True
+
+    rc = cmd_resync(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "would reset 3" in out
+
+    s = Store(db_path)
+    try:
+        # All last_seen_updated still set
+        for daely_id in ("d1", "d2", "d3"):
+            assert s.get_event_mapping(daely_id).last_seen_updated is not None
+    finally:
+        s.close()
+
+
+def test_recolor_command_resets_all_mappings(tmp_path, capsys):
+    """re-color is a thin alias for resync over all calendars."""
+    from daely_google_bridge.cli import cmd_recolor
+
+    config_path, db_path = _resync_fixture(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.dry_run = False
+    # Note: cmd_recolor sets args.calendar = None internally
+
+    rc = cmd_recolor(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "reset 3 mapping" in out
+
+    s = Store(db_path)
+    try:
+        for daely_id in ("d1", "d2", "d3"):
+            assert s.get_event_mapping(daely_id).last_seen_updated is None
+    finally:
+        s.close()
+
+
+def test_main_dispatches_resync(tmp_path, capsys):
+    """`bridge resync --dry-run` via main() — verify argparse wiring."""
+    config_path, _ = _resync_fixture(tmp_path)
+    rc = main(["-c", str(config_path), "resync", "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+
+
+def test_main_dispatches_recolor(tmp_path, capsys):
+    """`bridge re-color --dry-run` via main()."""
+    config_path, _ = _resync_fixture(tmp_path)
+    rc = main(["-c", str(config_path), "re-color", "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
 
 
 # ────────── bootstrap dry-run ──────────
