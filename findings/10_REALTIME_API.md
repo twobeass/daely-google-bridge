@@ -1,8 +1,13 @@
 # 10 – Realtime-API (`/realtime`-Endpoint)
 
-> **Phase A** — statische Rekonstruktion aus dem Dart-AOT-Disassembly.
-> Alle hier dokumentierten Strings + Klassen-Layouts kommen direkt aus
-> `findings/blutter_out/`. Keine Live-Calls.
+> **Stand 2026-05-08, post-v1.1.0:** Statische Rekonstruktion ist
+> vollständig; Live-Probes haben Connection + Handshake + SetFilter
+> validiert. **Aber:** trotz akzeptiertem Filter wurde in keinem Test
+> jemals ein echtes `ReceiveNotification`-Event vom Server empfangen
+> (siehe Abschnitt "Open: Why no notifications?" am Ende). Hypothese:
+> Daelys Server fired keine Push-Events zurück an weitere Connections
+> desselben User-Accounts. Tests mit zweitem Account und mitmproxy-Wire-
+> Inspektion stehen aus.
 
 ## TL;DR
 
@@ -324,3 +329,61 @@ Calendars-Topics greifen". Akzeptiert ohne Fehler.
 - Routing-Logik: `subject.startswith("calendar/")` → Trigger
   Targeted-Sync. Alles andere wird gedroppt + geloggt.
 - Polling bleibt aktiv als Safety-Net.
+
+## Open: Why no notifications? (post-v1.1.0)
+
+In allen vier Test-Iterationen (Probe 2, 2b, 2c, 2d und v1.0.0–v1.0.3
+im laufenden Container) wurden **null** `ReceiveNotification`-Events
+empfangen, obwohl in einigen Sessions Tablet-Edits gemacht wurden.
+
+Was definitiv funktioniert:
+- HTTP `POST /realtime/negotiate` → 200 mit standard SignalR-Response
+- `GET /realtime?id=...` → 200 + `text/event-stream` Antwort
+- Handshake (`{"protocol":"json","version":1}`) → Server schickt `{}` zurück
+- `SetFilter`-Invocation → Server schickt `{"type":3,"result":null}` (= success)
+- Heartbeat-Pings (`{"type":6}`) alle 15s
+
+Was nicht beobachtet wurde:
+- `{"type":1,"target":"ReceiveNotification","arguments":[...]}` Frames
+
+Drei Filter-Formate getestet, alle gleicher Befund:
+- `calendars: []` (v1.0.0/1.0.1)
+- `calendars: [<internal-uuid>]` (v1.0.2)
+- `calendars: null` (v1.0.3+)
+
+**Hypothesen für die fehlenden Notifications:**
+
+1. **Same-Account-Suppression**: Daelys Realtime-Server fired Notifications
+   nur an Connections **anderer** User-Accounts. Edits durch denselben
+   Account erzeugen keine Pushes an Connections dieses Accounts. Wäre
+   technisch sinnvoll: "der User der den Edit macht, weiß ja schon was er
+   gemacht hat — keine Notification nötig".
+   
+   Im Test-Setup gibt es nur **einen** Daely-Account (Mehrere Profile in
+   der Familie haben kein eigenes Login → Profile mit `userId=null`).
+   Bridge + Tablet teilen sich diesen Account. Wenn Hypothese 1 stimmt,
+   ist Realtime in dieser Konfiguration strukturell nutzlos.
+
+2. **Subtile Filter-/Header-Discrepancy**: die Dart-App schickt etwas
+   was wir statisch nicht sehen — extra Header, Connection-Capability,
+   oder eine zusätzliche Hub-Methode die in einer anderen
+   Service-Klasse invoked wird. Aufzulösen nur per mitmproxy gegen
+   Tablet-Traffic.
+
+3. **Server-side-Bug oder Wartung**: weniger wahrscheinlich, da die
+   offizielle App lt. Beobachtung Realtime-Updates **bekommt** —
+   aber das würde ein zweiter Account oder Multi-Device-Setup
+   bestätigen müssen.
+
+**Status:** Bridge-Code ist sauber implementiert + getestet (offline 298
+Tests grün). Feature ist als **experimentell** markiert (`realtime.enabled:
+false` als Default in v1.1.0). Falls jemand mit Multi-Account-Setup das
+testet und Notifications empfängt, ist das die definitive Bestätigung
+von Hypothese 2 (irgendwas am Filter ist anders) — sonst Hypothese 1
+(strukturelle Limitation).
+
+**Nächster Investigations-Schritt** (falls je relevant): mitmproxy auf
+einem Hilfs-Rechner, Tablet's WLAN-Proxy auf den Hilfs-Rechner stellen,
+Daely-CA-Cert akzeptieren (kein Pinning observed), Live-Edit machen,
+`POST .../realtime?id=...`-Body mit der echten App-Filter-Form
+extrahieren, anonymisieren, Bridge 1:1 darauf abgleichen.

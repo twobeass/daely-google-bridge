@@ -342,45 +342,63 @@ in `bridge.db`. Beim nächsten Sync-Cycle sieht die Bridge die Events als
 > kann das gleiche per direktem CLI-Aufruf passieren:
 > `docker compose run --rm bridge bridge re-color`.
 
-### Optional: Realtime-Push aktivieren
+### Realtime-Push (experimentell — siehe Caveat)
 
-Standardmäßig synchronisiert die Bridge alle 15 Minuten per Polling. Mit
-**Realtime-Push** öffnet sie zusätzlich eine persistente Verbindung zu
-Daelys eingebautem Realtime-Service (SignalR über SSE) — Calendar-
-Änderungen auf dem Tablet landen dann **innerhalb weniger Sekunden** im
-Google-Kalender, nicht erst beim nächsten Polling-Cycle.
+Die Bridge enthält einen voll implementierten **SignalR-Realtime-Client**
+für Daelys `/realtime`-Hub (Reverse-Engineered aus dem Dart-AOT, dokumentiert
+in `findings/10_REALTIME_API.md`). Idee: statt alle 15 Minuten polln,
+hört die Bridge per persistenter SSE-Connection auf Push-Notifications
+und triggert bei jedem Calendar-Edit einen sofortigen Sync.
 
-In der `config.yaml` ergänzen:
+> **⚠️ Caveat (Stand v1.1.0):** Im Live-Test gegen einen Single-Daely-
+> Account-Setup hat die Bridge in keiner Test-Session jemals eine echte
+> `ReceiveNotification` vom Server empfangen — selbst nicht, wenn Tablet-
+> Edits gemacht wurden. Connection, Handshake, SetFilter und Heartbeat-
+> Pings funktionieren alle einwandfrei (`completion: null` = Server hat
+> Filter akzeptiert). Vermutete Ursache: **Daelys Server fired Realtime-
+> Notifications nicht zurück an weitere Connections desselben User-
+> Accounts** ("du hast den Edit gemacht — du weißt das schon"). Tests
+> mit zweitem Daely-Account stehen aus, mitmproxy-Wire-Inspektion
+> ebenfalls.
+>
+> Heißt konkret: in einem Familien-Setup mit nur **einem** Daely-Login
+> bringt Realtime-Push wahrscheinlich nichts, weil der Server für
+> Self-Edits keine Notifications fired. Polling alle 15 Minuten reicht
+> für den Use-Case "Tablet → Google-Calendar-Widget" voll aus.
+>
+> **Default: aus.** Aktivieren nur wenn du den Server-Behavior testen
+> oder dokumentieren willst. Bei einem Familien-Setup mit zwei oder mehr
+> echten Daely-Accounts könnte's klappen — wenn ja, schreib bitte ein
+> Issue, dann härte ich das Feature.
+
+Aktivieren (auf eigene Verantwortung):
 
 ```yaml
 realtime:
   enabled: true
-  debounce_seconds: 2.0   # mehrere Edits in Folge → 1 Sync
+  debounce_seconds: 2.0
 ```
 
-Bridge danach neu starten (`docker compose restart bridge`). Logs sollten
-zeigen:
+Bridge danach neu starten. Logs zeigen den Connection-Aufbau:
 
 ```
 realtime.start
 realtime.negotiate_ok
 realtime.handshake_ok
-realtime.set_filter_sent
+realtime.set_filter_sent filter={...}
+realtime.completion_ok          # Server hat Filter akzeptiert
+realtime.ping pings_total=1     # alle ~60s ein Lebenszeichen
 ```
 
-Bei jedem späteren Tablet-Edit:
-
+Wenn jemals ein echter Push kommt, würde das so aussehen:
 ```
-realtime.event subject=calendar/event entity_id=…
+realtime.first_event_for_subject subject=calendar/event raw={...}
 run.realtime_trigger_scheduled debounce_seconds=2.0
-sync.start ... sync.done inserts=0 patches=1 …
+sync.start ... sync.done patches=1 ...
 ```
 
-Polling läuft trotzdem als **Safety-Net** weiter — wenn die Realtime-
-Connection mal kurz droppt, fängt der 15-Minuten-Cycle alles auf, was
-während des Disconnects passiert ist. Auto-Reconnect mit Exponential-
-Backoff bringt die Realtime-Connection in der Regel binnen Sekunden
-zurück.
+Polling läuft sowieso parallel — wenn Realtime nicht fired, übernimmt's
+nach spätestens 15 Min der Polling-Cycle. Du verlierst also nichts.
 
 Keine zusätzlichen Ports nötig — die Verbindung ist outbound vom Bridge-
 Container zu `daely-connect.com`.
@@ -516,7 +534,9 @@ committen.
 
 ## Status
 
-**v1.0.0 — Stable.** Feature-complete für den primären Use-Case.
+**v1.1.0 — Stable.** Feature-complete für den primären Use-Case (Polling-
+basierter Sync). Realtime-Push ist als experimentelle Erweiterung enthalten,
+aber im Single-Account-Test nie produktiv geworden — Details unten.
 
 | Phase | Status | Inhalt |
 |---|---|---|
@@ -531,4 +551,4 @@ committen.
 | Health | ✅ | `/healthz` + `/readyz` + `/status` HTTP-Endpoints |
 | CI/CD | ✅ | GitHub Action für Tests + Release-Workflow auf `v*`-Tags |
 | Image | ✅ | Multi-Arch Dockerfile + Compose + ghcr.io-Publishing |
-| Realtime | ✅ | SignalR-Push für Sub-Sekunden-Sync-Latenz (opt-in) |
+| Realtime | ⚗️ | SignalR-Push, voll implementiert + getestet — aber Server-Push ist im Single-Account-Setup nicht beobachtet (siehe README-Caveat) |

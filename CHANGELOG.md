@@ -12,6 +12,44 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.1.0] - 2026-05-08
+
+**Stable.** Schließt das Realtime-Kapitel mit ehrlicher Bestandsaufnahme
+ab und positioniert die Bridge wieder klar am primären Use-Case
+(Polling-basierter Sync) als Default.
+
+### Geändert
+- **Realtime-Push als experimentelles Feature markiert.** Trotz
+  vollständiger SignalR-Protokoll-Implementierung (negotiate, SSE,
+  handshake, SetFilter) und allen drei getesteten Filter-Formaten
+  (`[]`, `[<uuid>]`, `null`) wurde in keinem Live-Test je eine echte
+  `ReceiveNotification` vom Server empfangen — selbst bei aktiven
+  Tablet-Edits.
+
+  Wahrscheinlichste Ursache (siehe `findings/10_REALTIME_API.md`):
+  Daelys Realtime-Server fired Push-Notifications nicht zurück an
+  weitere Connections desselben User-Accounts. Im Single-Daely-Account-
+  Setup ist die Bridge dadurch strukturell ohne Realtime — Polling
+  alle 15 Min bleibt der primäre Sync-Mechanismus.
+
+  Code-seitig ändert sich nichts: `realtime.enabled` ist weiterhin
+  Default `false`. Wer testen will (z. B. Multi-Account-Setup), kann
+  opt-in. Realtime-Implementation bleibt im Code als solides Fundament,
+  falls je ein Multi-Account-Setup auftaucht oder ein zukünftiger
+  Investigations-Pass via mitmproxy die offizielle App-Filter-Form
+  extrahiert.
+
+- README + `findings/10_REALTIME_API.md` mit klarem Caveat-Abschnitt
+  und Open-Hypothesen.
+- Status-Tabelle: Realtime-Phase ist `⚗️` (experimentell), nicht `✅`.
+
+### Bewertung
+- **Polling (alle Phasen ✅):** funktioniert seit v0.1.0 produktiv,
+  zuverlässig, getestet.
+- **Realtime (Phase ⚗️):** Protokoll vollständig dokumentiert, Code
+  produktions-reif gebaut, aber im einzigen verfügbaren Test-Setup
+  ohne Wirkung. Kein Block für den primären Use-Case.
+
 ## [1.0.3] - 2026-05-08
 
 Patch — testet die dritte Hypothese zum `calendars`-Filter-Feld
@@ -255,7 +293,8 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.1.0
 [1.0.3]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.3
 [1.0.2]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.2
 [1.0.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.1
