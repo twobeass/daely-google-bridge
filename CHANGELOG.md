@@ -12,6 +12,41 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.0.0] - 2026-05-08
+
+**Stable release.** Die Bridge ist feature-complete für ihren primären
+Use-Case (Daely-Events sichtbar in Google-Calendar-Widgets/Home-Assistant)
+und hat seit Tagen produktiv ohne Probleme gelaufen. Zusätzlich liefert
+1.0 das letzte große UX-Feature: Sub-Sekunden-Latenz statt 15-Minuten-
+Polling über SignalR-Realtime.
+
+### Hinzugefügt
+- **§1.1 Realtime-Push (SignalR über SSE)** — opt-in via `realtime.enabled:
+  true`. Bridge öffnet eine persistente SSE-Connection zu Daelys
+  `/realtime`-Hub und triggert bei jedem Calendar-Push einen
+  debounced incremental_sync. Effekt: Calendar-Änderungen propagieren
+  in Sekunden statt 15 Minuten.
+  - Reverse-Engineered SignalR JSON Hub Protocol (negotiate → handshake →
+    SetFilter → ReceiveNotification-Stream)
+  - Auto-reconnect mit exponential backoff (1s → 5min cap)
+  - Token-Rotation mid-stream (über `acquireNewToken`-Pattern)
+  - Liveness-Detection: kein Ping in 45s → Reconnect
+  - Polling bleibt aktiv als Safety-Net — wenn Realtime-Connection
+    wiederholt droppt, läuft der 15-min-Cycle weiter
+  - 20 neue Offline-Tests gegen einen Fake-SSE-Stream
+- `RealtimeClient`-Klasse in `realtime_client.py` (eigenständig nutzbar)
+- `RealtimeFilter`/`RealtimeEvent`-Modelle mit `extra="ignore"` für
+  zukünftige Server-Schema-Änderungen
+- Config-Sektion `realtime:` mit Toggle + Debounce + per-Topic-Subscribes
+- `findings/10_REALTIME_API.md` — vollständige Dokumentation des Daely-
+  Realtime-Protokolls inkl. Live-validierter Frame-Formate
+
+### Geändert
+- Bridge-Daemon (`bridge run`) startet jetzt zwei parallel laufende
+  Schleifen wenn beide enabled: Polling-Scheduler (15min default) und
+  Realtime-Push-Listener. Ein realtime-getriggerter Sync läuft als
+  scheduler-managed One-Shot-Job (idempotent mit `replace_existing=True`).
+
 ## [0.1.1] - 2026-05-08
 
 Patch-Release. Härtet die SQLite-WAL-Sichtbarkeit zwischen dem Daemon-
@@ -156,6 +191,7 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.0
 [0.1.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.1
 [0.1.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.0

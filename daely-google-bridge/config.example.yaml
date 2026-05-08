@@ -74,6 +74,23 @@ health_server:
   bind_port: 8090
 
 
+# ─── Realtime push (SignalR over SSE) ────────────────────────────
+# Off by default. When enabled, the bridge maintains a persistent SSE
+# connection to Daely's /realtime hub and triggers a debounced incremental
+# sync within seconds of each calendar change — replacing the 15-minute
+# poll latency. Polling stays active as a safety net.
+#
+# Subscribes to user + group calendar topics by default (chores/checklists
+# are off — the bridge doesn't sync those).
+realtime:
+  enabled: false
+  debounce_seconds: 2.0
+  subscribe_user_calendars: true
+  subscribe_group_calendars: true
+  subscribe_chores: false
+  subscribe_checklists: false
+
+
 # ─── Storage ─────────────────────────────────────────────────────
 db_path: ./bridge.db
 

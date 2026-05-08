@@ -70,7 +70,7 @@ inkl. Tests + Doku):
 
 | #     | Feature                                          | Cluster   | Wert | Kompl. | Risiko | Status   | Empfehlung    |
 |-------|--------------------------------------------------|-----------|:----:|:------:|:------:|----------|---------------|
-| 1.1   | Echtzeit-Sync via Daely-SSE (`realtime`)         | Engine    | ★★☆  | L      | 🟡     | open     | Maybe         |
+| 1.1   | Echtzeit-Sync via Daely-SignalR (`realtime`)     | Engine    | ★★★  | L      | 🟡     | **done v1.0.0** | —         |
 | 1.2   | Retry-Loop für `failed=true`-Mappings            | Engine    | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 1.3   | Schema-Migrations für SQLite                     | Engine    | ★★★  | S      | 🟢     | **done v0.1.0** | —         |
 | 1.4   | Health-Check-HTTP-Endpoint                       | Engine    | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |

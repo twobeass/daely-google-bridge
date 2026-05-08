@@ -63,6 +63,19 @@ health_server:
   bind_port: 8090
 
 
+# ─── Realtime push (SignalR over SSE) ────────────────────────────
+# Off by default. When on, calendar changes propagate within seconds
+# instead of 15 min. Polling stays active as a fallback. No new ports
+# to expose — the connection is outbound from the bridge to Daely.
+realtime:
+  enabled: false
+  debounce_seconds: 2.0
+  subscribe_user_calendars: true
+  subscribe_group_calendars: true
+  subscribe_chores: false
+  subscribe_checklists: false
+
+
 # ─── Storage ─────────────────────────────────────────────────────
 # /data is the read-write volume; bridge.db lives there.
 db_path: /data/bridge.db

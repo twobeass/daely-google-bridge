@@ -172,6 +172,44 @@ class CalendarWithEvents(Calendar):
     endDate: datetime | None = None
 
 
+# ─────────────────── realtime ───────────────────
+
+class RealtimeEvent(_DaelyModel):
+    """One push notification from Daely's `/realtime` SignalR hub.
+
+    Schema reverse-engineered from the Dart `_$RealtimeEventImpl.toString`
+    pattern; see `findings/10_REALTIME_API.md`. All fields are optional
+    because we haven't observed a real ReceiveNotification at probe time
+    and the precise wire shape will need runtime validation.
+
+    `extra="ignore"` (inherited from _DaelyModel) lets us tolerate any
+    additional fields without breaking — caller can dig into `raw` if
+    a future field becomes interesting.
+    """
+    subject: str | None = None
+    topic: str | None = None
+    entityId: str | None = None
+    topicKind: str | None = None
+    topicKindId: str | None = None
+
+    @property
+    def main_topic(self) -> str:
+        """Top-level topic from subject — first segment before `/`.
+
+        Subjects we know exist (per RE):
+          calendar/event, group, user, administration/setup, chore/completion,
+          checklist/item, meal-plan
+        """
+        if not self.subject:
+            return ""
+        return self.subject.split("/", 1)[0]
+
+    @property
+    def is_calendar_event(self) -> bool:
+        """True if this notification concerns a calendar event change."""
+        return self.main_topic == "calendar"
+
+
 # ─────────────────── handy helpers ───────────────────
 
 def is_recurring_master_or_unique(event: CalendarEvent) -> bool:
@@ -203,6 +241,7 @@ __all__ = [
     "GroupSummary",
     "Profile",
     "PresentationTypeWire",
+    "RealtimeEvent",
     "ShareTypeWire",
     "StartEnd",
     "SyncTokenPair",

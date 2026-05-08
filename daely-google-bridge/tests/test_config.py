@@ -225,3 +225,49 @@ def test_example_yaml_loads_and_validates():
     assert cfg.daely_email == "you@example.com"
     assert cfg.google_oauth_scopes == ["https://www.googleapis.com/auth/calendar"]
     assert cfg.profile_calendar_mapping == {}
+
+
+# ────────── realtime section (§1.1) ──────────
+
+
+def test_realtime_defaults_to_disabled():
+    cfg = BridgeConfig(
+        daely_email="x@example.com",
+        google_oauth_client_secrets_file=Path("/tmp/x"),
+    )
+    assert cfg.realtime.enabled is False
+    assert cfg.realtime.debounce_seconds == 2.0
+    assert cfg.realtime.subscribe_user_calendars is True
+    assert cfg.realtime.subscribe_group_calendars is True
+    assert cfg.realtime.subscribe_chores is False
+    assert cfg.realtime.subscribe_checklists is False
+
+
+def test_realtime_can_be_enabled():
+    cfg = BridgeConfig(
+        daely_email="x@example.com",
+        google_oauth_client_secrets_file=Path("/tmp/x"),
+        realtime={"enabled": True, "debounce_seconds": 5.0},
+    )
+    assert cfg.realtime.enabled is True
+    assert cfg.realtime.debounce_seconds == 5.0
+
+
+def test_realtime_debounce_validated():
+    from pydantic import ValidationError as VE
+    for bad in [-1.0, 61.0]:
+        with pytest.raises(VE):
+            BridgeConfig(
+                daely_email="x@example.com",
+                google_oauth_client_secrets_file=Path("/tmp/x"),
+                realtime={"debounce_seconds": bad},
+            )
+
+
+def test_realtime_extra_field_rejected():
+    with pytest.raises(ValidationError):
+        BridgeConfig(
+            daely_email="x@example.com",
+            google_oauth_client_secrets_file=Path("/tmp/x"),
+            realtime={"unknown_key": True},
+        )

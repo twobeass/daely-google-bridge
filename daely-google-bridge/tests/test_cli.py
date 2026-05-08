@@ -573,6 +573,187 @@ def test_main_dispatches_doctor(tmp_path, capsys):
     assert "Overall: OK" in out
 
 
+# ────────── realtime daemon integration (§1.1) ──────────
+
+
+def _build_run_args(tmp_path):
+    """Build a minimal config + args for cmd_run, with realtime ENABLED."""
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    cfg = BridgeConfig(
+        daely_email="t@example.com",
+        google_oauth_client_secrets_file=secrets,
+        db_path=tmp_path / "bridge.db",
+        log_format="text",
+        realtime={"enabled": True, "debounce_seconds": 0.5},
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.once = False
+    return args
+
+
+def test_cmd_run_starts_realtime_when_enabled(tmp_path, capsys):
+    """realtime.enabled=true → factory invoked, client.start() called."""
+    args = _build_run_args(tmp_path)
+
+    # Mock daely with the methods _start_realtime_client uses
+    fake_daely = MagicMock()
+    fake_daely.access_token = "at"
+    fake_daely.get_me.return_value = MagicMock(id="user-uuid-test")
+    fake_daely.get_my_groups.return_value = [MagicMock(id="group-uuid-test")]
+
+    # Realtime client mock returned by factory
+    realtime_mock = MagicMock()
+    captured_factory_args = {}
+
+    def _rt_factory(cfg, daely, me, group, on_event):
+        captured_factory_args["cfg"] = cfg
+        captured_factory_args["me"] = me
+        captured_factory_args["group"] = group
+        captured_factory_args["on_event"] = on_event
+        return realtime_mock
+
+    # Stop the scheduler immediately so cmd_run returns
+    scheduler_mock = MagicMock()
+    scheduler_mock.start.side_effect = KeyboardInterrupt
+
+    from daely_google_bridge.sync import SyncReport
+    full_sync_fn = MagicMock(return_value=SyncReport())
+
+    rc = cmd_run(
+        args,
+        daely_factory=lambda s, c: fake_daely,
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=full_sync_fn,
+        incremental_sync_fn=MagicMock(),
+        scheduler_factory=lambda: scheduler_mock,
+        realtime_client_factory=_rt_factory,
+    )
+    assert rc == 0
+    realtime_mock.start.assert_called_once()
+    realtime_mock.stop.assert_called_once()
+    assert captured_factory_args["me"].id == "user-uuid-test"
+    assert captured_factory_args["group"].id == "group-uuid-test"
+
+
+def test_cmd_run_skips_realtime_when_disabled(tmp_path):
+    from daely_google_bridge.config import load_config as _load_config
+    args = _build_run_args(tmp_path)
+    # Override config to disable realtime
+    cfg = _load_config(args.config)
+    cfg = cfg.model_copy(update={"realtime": cfg.realtime.model_copy(update={"enabled": False})})
+    save_config(cfg, args.config, backup=False)
+
+    rt_factory_calls = {"count": 0}
+
+    def _rt_factory(*a, **kw):
+        rt_factory_calls["count"] += 1
+        return MagicMock()
+
+    scheduler_mock = MagicMock()
+    scheduler_mock.start.side_effect = KeyboardInterrupt
+
+    from daely_google_bridge.sync import SyncReport
+    rc = cmd_run(
+        args,
+        daely_factory=lambda s, c: MagicMock(close=MagicMock()),
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=MagicMock(return_value=SyncReport()),
+        incremental_sync_fn=MagicMock(),
+        scheduler_factory=lambda: scheduler_mock,
+        realtime_client_factory=_rt_factory,
+    )
+    assert rc == 0
+    assert rt_factory_calls["count"] == 0
+
+
+def test_realtime_callback_only_triggers_on_calendar_events(tmp_path, capsys):
+    """The on_event callback registered by _start_realtime_client should
+    schedule a sync ONLY for calendar/* subjects."""
+    args = _build_run_args(tmp_path)
+
+    fake_daely = MagicMock()
+    fake_daely.access_token = "at"
+    fake_daely.get_me.return_value = MagicMock(id="u")
+    fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
+
+    captured = {}
+
+    def _rt_factory(cfg, daely, me, group, on_event):
+        captured["on_event"] = on_event
+        return MagicMock()
+
+    scheduler_mock = MagicMock()
+    scheduler_mock.start.side_effect = KeyboardInterrupt
+
+    from daely_google_bridge.sync import SyncReport
+    cmd_run(
+        args,
+        daely_factory=lambda s, c: fake_daely,
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=MagicMock(return_value=SyncReport()),
+        incremental_sync_fn=MagicMock(),
+        scheduler_factory=lambda: scheduler_mock,
+        realtime_client_factory=_rt_factory,
+    )
+
+    on_event = captured["on_event"]
+
+    # Calendar event → scheduler.add_job called
+    from daely_google_bridge.models import RealtimeEvent
+    on_event(RealtimeEvent(subject="calendar/event", entityId="ev-1"))
+    assert scheduler_mock.add_job.called
+    # The job was scheduled with id="realtime-trigger" + replace_existing=True
+    args_called = scheduler_mock.add_job.call_args
+    assert args_called.kwargs.get("id") == "realtime-trigger"
+    assert args_called.kwargs.get("replace_existing") is True
+
+    # Non-calendar event → no new add_job
+    add_job_count_before = scheduler_mock.add_job.call_count
+    on_event(RealtimeEvent(subject="chore/completion"))
+    on_event(RealtimeEvent(subject="meal-plan"))
+    on_event(RealtimeEvent(subject="user"))
+    assert scheduler_mock.add_job.call_count == add_job_count_before
+
+
+def test_realtime_disabled_when_get_me_fails(tmp_path, capsys):
+    """If we can't fetch user/group at startup, realtime stays off but
+    the daemon still runs polling."""
+    args = _build_run_args(tmp_path)
+
+    fake_daely = MagicMock()
+    fake_daely.access_token = "at"
+    fake_daely.get_me.side_effect = RuntimeError("backend down")
+
+    rt_factory_calls = {"count": 0}
+
+    def _rt_factory(*a, **kw):
+        rt_factory_calls["count"] += 1
+        return MagicMock()
+
+    scheduler_mock = MagicMock()
+    scheduler_mock.start.side_effect = KeyboardInterrupt
+
+    from daely_google_bridge.sync import SyncReport
+    rc = cmd_run(
+        args,
+        daely_factory=lambda s, c: fake_daely,
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=MagicMock(return_value=SyncReport()),
+        incremental_sync_fn=MagicMock(),
+        scheduler_factory=lambda: scheduler_mock,
+        realtime_client_factory=_rt_factory,
+    )
+    assert rc == 0
+    # Factory not invoked (we couldn't fetch group), but scheduler still ran
+    assert rt_factory_calls["count"] == 0
+    err = capsys.readouterr().err
+    assert "realtime disabled" in err.lower()
+
+
 # ────────── bootstrap dry-run ──────────
 
 @pytest.fixture()

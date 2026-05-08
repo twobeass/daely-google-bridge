@@ -1,0 +1,326 @@
+# 10 – Realtime-API (`/realtime`-Endpoint)
+
+> **Phase A** — statische Rekonstruktion aus dem Dart-AOT-Disassembly.
+> Alle hier dokumentierten Strings + Klassen-Layouts kommen direkt aus
+> `findings/blutter_out/`. Keine Live-Calls.
+
+## TL;DR
+
+Daely betreibt eine **SignalR-basierte Realtime-API** unter
+`https://daely-connect.com/realtime`. Die offizielle App (Flutter via
+`signalr_netcore`-Paket) nutzt sie, um Notification-Events vom Backend
+push-basiert zu empfangen — statt zu polln.
+
+Nicht plain SSE: SignalR ist Microsofts ASP.NET-Core-Realtime-Stack mit
+JSON-Hub-Protokoll. Das Protokoll auto-negotiates Transports (WebSocket
+bevorzugt, SSE als Fallback, LongPolling als letzte Option).
+
+## Endpoint-Map
+
+| Methode | Pfad                                | Zweck                                                           |
+|---------|-------------------------------------|-----------------------------------------------------------------|
+| POST    | `/realtime/negotiate?negotiateVersion=1` | Standard-SignalR-Negotiate. Liefert `connectionId`, `connectionToken`, `availableTransports`. Bearer-Auth nötig. |
+| GET     | `/realtime?id=<connectionToken>`    | SSE-Transport (Accept: `text/event-stream`). Bearer-Auth nötig.|
+| WS      | `wss://daely-connect.com/realtime?id=<connectionToken>` | WebSocket-Transport. Bearer-Auth via Query oder Header.      |
+
+**Auth:** Standard-Bearer-Token aus dem Daely-OAuth-Flow (gleicher AT wie für
+`/api/*`). Bei Disconnect ruft die App `acquireNewToken` auf und reconnected.
+
+## SignalR Hub-Protokoll (JsonHubProtocol v1)
+
+### Server → Client
+
+**Hub-Method:** `ReceiveNotification(map)` — der Server invokiert diese
+Methode auf dem verbundenen Client. Map-Inhalt entspricht einem
+serialisierten `RealtimeEvent`-Objekt.
+
+### Client → Server
+
+**Hub-Method:** `SetFilter(filter)` — der Client schickt sein Filter-Objekt
+nach Connect-Etablierung (verm. einmalig direkt nach handshake_ok).
+Argument: serialisiertes `RealtimeFilter`-Objekt.
+
+**Keine weiteren `invoke()`-Calls** entdeckt — die App schickt nur SetFilter
+und konsumiert dann passiv `ReceiveNotification`-Pushes. Sehr schlank.
+
+## Datenmodelle
+
+### `RealtimeFilter` (Client → Server)
+
+JSON-Felder entdeckt aus `_$$RealtimeFilterImplToJson` in
+`asm/common/models/realtime/realtime_filter.dart`:
+
+```json
+{
+  "user":                    "<user-uuid>",
+  "group":                   "<group-uuid>",
+  "subscribeUserCalendars":  true,
+  "subscribeGroupCalendars": true,
+  "subscribeChores":         false,
+  "subscribeChecklists":     false
+}
+```
+
+**Beobachtungen:**
+- `user` ist die UUID des angemeldeten User-Accounts (matcht
+  `UserMe.id` aus `findings/02_AUTH.md`).
+- `group` ist die Group-UUID, deren Calendar/Chores/Checklists subscriben.
+- Die `subscribe*`-Flags gates pro Topic-Kind: nur die mit `true` werden
+  gepusht.
+- Für die Bridge sinnvoll: `subscribeUserCalendars=true`,
+  `subscribeGroupCalendars=true`, Rest auf `false`. Wir wollen nur
+  Calendar-Events.
+
+### `RealtimeEvent` (Server → Client)
+
+`toString` liefert:
+
+```
+RealtimeEvent(subject: <s>, topic: <t>, entityId: <e>, topicKind: <tk>, topicKindId: <tki>, ...)
+```
+
+Konkrete JSON-Struktur (aus dem Notification-Handler, der das Map nach
+`subject`-String routet):
+
+```json
+{
+  "resourceType": "Calendar" | "Event" | "Chore" | "Checklist" | "Group" | "User",
+  "subject":      "calendar/event" | "chore/completion" | "user" | "group" | "administration/setup" | …,
+  "topic":        "<string>",
+  "entityId":     "<uuid>",
+  "topicKind":    "<string>",
+  "topicKindId":  "<uuid>",
+  …
+}
+```
+
+**Subject-Schema** (aus den observed Strings):
+
+| Top-Topic        | Sub-Topics (gesehen)                                |
+|------------------|------------------------------------------------------|
+| `calendar`       | `event`                                              |
+| `group`          | (no sub identified)                                  |
+| `user`           | (no sub identified)                                  |
+| `administration` | `setup_code`, `setup`, `profile`, `invite_code`     |
+| `chore`          | `completion`                                         |
+| `checklist`      | `item`                                               |
+| `meal-plan`      | (no sub identified)                                  |
+
+Subject-Format ist `topic/sub` mit `/` als Trenner. Unbekannte Sub-Strings
+loggt der Client mit `Unknown <topic> subtype: ...`.
+
+## Verbindungs-Lebenszyklus (RealtimeService)
+
+Aus den State-Strings (`SignalR connected`, `SignalR reconnected:`,
+`SignalR disconnected:`, `Reconnected to SignalR`, `Could not init realtime
+service`, `Initial connection failed:`):
+
+1. **Init:** `HubConnectionBuilder().withUrl(API_URL + "/realtime",
+   accessTokenFactory: ...).build()` — auto-negotiate-Transport.
+2. **Register handler:** `connection.on("ReceiveNotification", _onMessage)`.
+3. **Start:** `connection.start()` — POST negotiate, dann Transport-Connect.
+4. **SetFilter:** `connection.invoke("SetFilter", [<filter-json>])`.
+5. **Receive loop:** Server pushed `ReceiveNotification`-Messages; Client
+   dispatcht via `subject`-Routing in die zuständigen Cubits (`CalendarCubit
+   ::_onRealtimeEvent`, `ChoreCubit::_onRealtimeEvent`, etc.).
+6. **Disconnect-Recovery:** `_retryConnection` mit Exponential-Backoff;
+   `acquireNewToken` ruft den OAuth-Refresh, falls AT abgelaufen.
+
+## Was die Bridge daraus baut (Plan)
+
+### Architektur
+
+```
+                       ┌─────────────────────┐
+                       │  Daely backend      │
+                       │  /realtime (SignalR)│
+                       └─────────┬───────────┘
+                                 │ ReceiveNotification(map)
+                                 ▼
+┌───────────────────────────────────────────────┐
+│  RealtimeClient (new module)                  │
+│  - SignalR JSON Hub Protocol                  │
+│  - SSE transport (simpler than WS)            │
+│  - SetFilter(user, group, calendars=true)     │
+│  - on_event callback                          │
+│  - reconnect-on-failure with backoff          │
+└───────────────────┬───────────────────────────┘
+                    │ event["subject"] starts with "calendar/" ?
+                    ▼
+        ┌───────────────────────┐
+        │ targeted_sync()       │ ← incremental_sync with smaller window
+        └───────────────────────┘
+                    │
+                    ▼
+              event_mapping table
+              + Google patch/insert
+```
+
+### Strategie
+
+- **SSE transport, nicht WS.** Begründung: einfacher zu implementieren,
+  kein Binary-Frame-Handling, simpel via `httpx.stream()`. SignalR fragt im
+  Negotiate explizit nach `ServerSentEvents`-Transport (siehe
+  `SERVERSENTEVENTS`-String im Constants-Pool).
+- **Polling bleibt als Fallback.** Bei Realtime-Disconnect-Loop läuft das
+  Polling weiter — die Bridge wird nicht "nur" realtime, sondern
+  "realtime mit Polling-Safety-Net".
+- **Targeted Sync, nicht Full.** Ein eintreffendes Event mit
+  `subject=calendar/event` triggert ein spezielles `targeted_sync(entityId)`,
+  das nur dieses Event neu von Daely zieht und Google-seitig patcht — viel
+  billiger als ein voller Cycle.
+- **Konfigurations-Toggle.** `realtime.enabled: false` (default) → Bridge
+  bleibt im klassischen Polling-Modus. Erst opt-in nach Erst-Test.
+
+### Risiken
+
+1. **Server-Verhalten unter Filter-Subscribe.** Wir wissen nicht
+   100 %, ob der Server fehlertolerant ist, wenn wir nur calendar-Topics
+   subscriben. Probe-Bedarf.
+2. **Re-Connect-Logik.** Refresh-Token-Rotation während offener
+   Stream-Verbindung ist nicht-trivial. Tests müssen das abdecken.
+3. **Resource-Verbrauch beim Backend.** Eine persistente Connection
+   pro Bridge-Instanz statt einem 15-min-Polling-Hit. Reduziert Last
+   eigentlich, ist aber ein anderes Lastprofil — Daely könnte das via
+   Connection-Limits drosseln. → Polling-Fallback fängt das ab.
+
+## Vor Implementierung erforderlich
+
+**Probe-Phase B** mit User-Freigabe (CLAUDE.md Regel 6):
+
+1. **Probe 1 — Negotiate:** `POST /realtime/negotiate?negotiateVersion=1`
+   mit Bearer. Klärt:
+   - Welche Transports der Server wirklich anbietet (WebSockets, SSE, LP)
+   - Format des Negotiate-Response (Standard-SignalR oder Daely-Variante)
+   - Connection-ID/Token-Format
+   1 Live-Call. Niedriges Risiko (read-only Discovery).
+
+2. **Probe 2 — SSE-Connect + SetFilter + capture:** Connect auf
+   `GET /realtime?id=<token>` mit `Accept: text/event-stream` + Bearer,
+   Handshake senden, `SetFilter`-Invoke schicken (mit User+Group-UUID + nur
+   `subscribeUserCalendars`/`subscribeGroupCalendars`), Stream für ~60s
+   capturen + anonymisieren. Klärt:
+   - Genaue Frame-Struktur der `ReceiveNotification`-Messages
+   - Welche Felder das `RealtimeEvent`-Objekt wirklich enthält
+   - Ob `SetFilter` ohne weitere Argumente funktioniert
+   - Heartbeat/Ping-Verhalten des Servers
+   1 persistente Connection für 60s. Mittleres Risiko, da etwas Erprobungs-
+   Verkehr entsteht. Anonymisierung der gecaptureten Frames vor Persistenz.
+
+## Live-validierte Erkenntnisse (Probe-Phase B, 2026-05-08)
+
+Drei live Probes (alle mit User-Freigabe pro Session) haben die statische
+Analyse bestätigt + folgende präzise Details ergänzt:
+
+### Negotiate-Response (echt)
+
+```json
+{
+  "negotiateVersion": 1,
+  "connectionId": "<22-char base64ish>",
+  "connectionToken": "<22-char base64ish>",
+  "availableTransports": [
+    {"transport": "WebSockets", "transferFormats": ["Text", "Binary"]},
+    {"transport": "ServerSentEvents", "transferFormats": ["Text"]},
+    {"transport": "LongPolling", "transferFormats": ["Text", "Binary"]}
+  ]
+}
+```
+
+Standard ASP.NET Core SignalR. Alle drei Transports angeboten, wir wählen
+SSE für die Bridge.
+
+### SSE-Connection-Lifecycle
+
+1. `GET /realtime?id=<connectionToken>` mit `Accept: text/event-stream` +
+   `Authorization: Bearer <AT>` → `200 OK`, Headers:
+   - `content-type: text/event-stream`
+   - `transfer-encoding: chunked`
+   - `cache-control: no-cache,no-store`
+2. Server sendet sofort einen SSE-Comment `:\r\n` als Alive-Signal.
+3. Client POSTet Handshake `{"protocol":"json","version":1}\x1e` an
+   die gleiche URL (`Content-Type: text/plain;charset=UTF-8`).
+4. POST-Response: `200 OK` mit leerem Body.
+5. Server pushed über SSE: `data: {}\x1e\r\n\r\n` — Handshake-Ack (leeres
+   JSON-Objekt = OK).
+6. Client POSTet `SetFilter`-Invocation:
+   `{"type":1,"invocationId":"1","target":"SetFilter","arguments":[<filter>]}\x1e`
+7. Server pushed über SSE:
+   `data: {"type":3,"invocationId":"1","result":null}\x1e\r\n\r\n` — Result
+   (type 3) mit `result: null` = SetFilter OK.
+8. Server pushed alle **15 Sekunden** einen Ping:
+   `data: {"type":6}\x1e\r\n\r\n`. SignalR-Default-`keepAliveInterval`.
+9. Bei einem Backend-Event (Calendar/Group/etc.): Server pushed Invocation
+   `data: {"type":1,"target":"ReceiveNotification","arguments":[{...event-payload...}]}\x1e\r\n\r\n`.
+
+### SSE-Frame-Format (präzise)
+
+- SSE-Event-Separator: **`\r\n\r\n`** (nicht `\n\n`!)
+- Innerhalb eines Events: Zeilen ab `data: ` enthalten den Payload
+- SignalR-Message-Separator innerhalb eines `data:`-Wertes: **`\x1e`** (RS)
+- Eine SSE-Event-Frame kann mehrere SignalR-Messages enthalten, getrennt
+  durch `\x1e`
+
+### RealtimeFilter — vollständige Feld-Liste
+
+JSON-Reihenfolge wie vom Dart-toJson serialisiert:
+
+```json
+{
+  "user":                    "<user-uuid>",
+  "group":                   "<group-uuid>",
+  "subscribeUserCalendars":  true,
+  "subscribeGroupCalendars": true,
+  "calendars":               [],                    // ← bisher übersehen!
+  "subscribeChores":         false,
+  "subscribeChecklists":     false
+}
+```
+
+Bedeutung von `calendars`: vermutlich Liste konkreter Calendar-UUIDs für
+Whitelist-Subscribe; `[]` heißt „keine Whitelist, alle subscribed
+Calendars-Topics greifen". Akzeptiert ohne Fehler.
+
+### Geprüfte Best-Practices für Reconnect
+
+- Bei `401` auf der SSE-GET: AT abgelaufen → via Daely-Refresh erneuern,
+  neuen Token in nächsten `GET` und `POST`. SignalR's `accessTokenFactory`
+  würde das automatisch tun.
+- Bei `close`-Message (`type=7`) vom Server: clean disconnect, neu
+  negotiaten + reconnecten.
+- Bei TCP-Drop (read-error auf SSE-Stream): exponential backoff (1s, 2s,
+  4s, …, capped bei 5min) + neu negotiaten.
+- `SetFilter` muss nach jedem Reconnect erneut gesendet werden (Server
+  hält Filter pro Connection-Token, nicht pro User-Account).
+
+### Confidence (post-Probe)
+
+**high** auf:
+- Vollständiger Connection-Lifecycle (negotiate → SSE → handshake → SetFilter)
+- Frame-Formate (CRLF separator, RS message terminator, `data:` prefix)
+- 15-Sekunden-Heartbeat-Interval
+- SetFilter-Argument-Schema (incl. `calendars`)
+- Authentication (Bearer im Header funktioniert auf SSE)
+
+**medium** auf:
+- Komplette Felder von `RealtimeEvent` — die statisch gefundenen 5
+  (subject, topic, entityId, topicKind, topicKindId) sind sehr wahrscheinlich
+  korrekt, aber wir haben kein Live-Sample (Tablet-Edits während der Probes
+  haben keine Events ausgelöst — möglicherweise weil keine Edits gemacht
+  wurden, oder weil der Server bei Edits durch den selben Account keine
+  Notifications fired).
+
+**low** auf:
+- Verhalten bei `subscribeChores: false` mit zusätzlichen Topic-Edits.
+  Da wir kein Live-Event gesehen haben, müssen wir das in Production
+  beobachten + via aggressivem Logging der ersten Events validieren.
+
+### Strategie für die Bridge-Implementation
+
+- `RealtimeEvent`-Pydantic-Modell mit `extra="ignore"` — unbekannte Felder
+  werden toleriert, falls Server mehr/andere Felder schickt
+- `RealtimeClient` loggt das **erste** ReceiveNotification jedes Subjects
+  vollständig (raw JSON) für die initiale Validation
+- Routing-Logik: `subject.startswith("calendar/")` → Trigger
+  Targeted-Sync. Alles andere wird gedroppt + geloggt.
+- Polling bleibt aktiv als Safety-Net.

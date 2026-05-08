@@ -35,6 +35,8 @@ from .config import BridgeConfig, load_config, save_config
 from .daely_client import DaelyAuthError, DaelyClient
 from .google_client import TOKEN_PROVIDER, GoogleClient
 from .health_server import BridgeState, start_health_server
+from .models import RealtimeEvent
+from .realtime_client import RealtimeClient
 from .store import Store
 from .sync import SyncReport, full_sync, incremental_sync
 
@@ -321,6 +323,7 @@ def cmd_run(
     full_sync_fn: Callable | None = None,
     incremental_sync_fn: Callable | None = None,
     scheduler_factory: Callable | None = None,
+    realtime_client_factory: Callable | None = None,
 ) -> int:
     """Run the sync loop.
 
@@ -411,6 +414,15 @@ def cmd_run(
     log.info("run.scheduler_started", interval_min=cfg.poll_interval_minutes)
     print(f"\nIncremental sync every {cfg.poll_interval_minutes}m. Ctrl+C to stop.")
 
+    # ── Realtime push (optional; layered on top of polling) ──
+    realtime_client = None
+    if cfg.realtime.enabled:
+        realtime_client = _start_realtime_client(
+            cfg=cfg, daely=daely, scheduler=scheduler,
+            isync_job=_job,
+            factory=realtime_client_factory,
+        )
+
     def _shutdown(signum, _frame):
         log.info("run.shutdown_requested", signal=signum)
         try:
@@ -426,6 +438,11 @@ def cmd_run(
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
+        if realtime_client is not None:
+            try:
+                realtime_client.stop(timeout=2.0)
+            except Exception:
+                pass
         if health_server is not None:
             try:
                 health_server.shutdown()
@@ -438,6 +455,90 @@ def cmd_run(
             pass
     log.info("run.stopped")
     return 0
+
+
+def _start_realtime_client(
+    *,
+    cfg: BridgeConfig,
+    daely: DaelyClient,
+    scheduler,  # noqa: ANN001  apscheduler.BlockingScheduler or compatible
+    isync_job: Callable[[], None],
+    factory: Callable | None,
+) -> RealtimeClient | None:
+    """Build + start the RealtimeClient, wire its events to a debounced
+    incremental_sync trigger via the running scheduler.
+
+    Returns the started client (or None if construction failed). Errors here
+    don't kill the daemon — the polling loop is still running.
+    """
+    # We need user_id + group_id for the SetFilter payload. Pull them once
+    # at startup; a stale id would just mean SetFilter targets the wrong
+    # subject space and we'd see no events — easy to spot.
+    try:
+        me = daely.get_me()
+        groups = daely.get_my_groups()
+        if not groups:
+            raise RuntimeError("no Daely groups; can't subscribe")
+        group = groups[0]
+    except Exception as e:
+        log.warning("run.realtime_disabled_fetch_failed", err=repr(e))
+        print(f"WARNING: realtime disabled — could not fetch user/group: {e}",
+              file=sys.stderr)
+        return None
+
+    debounce = cfg.realtime.debounce_seconds
+
+    def _on_event(event: RealtimeEvent) -> None:
+        # We only act on calendar topics; everything else is dropped (logged
+        # by the realtime client at debug level for first-of-its-subject).
+        if not event.is_calendar_event:
+            return
+        try:
+            from datetime import datetime, timedelta
+            scheduler.add_job(
+                isync_job,
+                "date",
+                run_date=datetime.now() + timedelta(seconds=debounce),
+                id="realtime-trigger",
+                replace_existing=True,
+                misfire_grace_time=30,
+            )
+            log.info(
+                "run.realtime_trigger_scheduled",
+                subject=event.subject,
+                entity_id=event.entityId,
+                debounce_seconds=debounce,
+            )
+        except Exception:
+            log.exception("run.realtime_trigger_failed",
+                          subject=event.subject)
+
+    if factory is not None:
+        client = factory(cfg, daely, me, group, _on_event)
+    else:
+        client = RealtimeClient(
+            access_token_provider=lambda: daely.access_token or "",
+            user_id=me.id,
+            group_id=group.id,
+            on_event=_on_event,
+            subscribe_user_calendars=cfg.realtime.subscribe_user_calendars,
+            subscribe_group_calendars=cfg.realtime.subscribe_group_calendars,
+            subscribe_chores=cfg.realtime.subscribe_chores,
+            subscribe_checklists=cfg.realtime.subscribe_checklists,
+        )
+
+    client.start()
+    log.info(
+        "run.realtime_started",
+        debounce_seconds=debounce,
+        subscribe_user_calendars=cfg.realtime.subscribe_user_calendars,
+        subscribe_group_calendars=cfg.realtime.subscribe_group_calendars,
+    )
+    print(
+        f"Realtime push enabled (debounce {debounce}s). "
+        f"Calendar changes propagate within seconds; polling stays as fallback.",
+    )
+    return client
 
 
 def cmd_status(args: argparse.Namespace) -> int:

@@ -342,6 +342,49 @@ in `bridge.db`. Beim nächsten Sync-Cycle sieht die Bridge die Events als
 > kann das gleiche per direktem CLI-Aufruf passieren:
 > `docker compose run --rm bridge bridge re-color`.
 
+### Optional: Realtime-Push aktivieren
+
+Standardmäßig synchronisiert die Bridge alle 15 Minuten per Polling. Mit
+**Realtime-Push** öffnet sie zusätzlich eine persistente Verbindung zu
+Daelys eingebautem Realtime-Service (SignalR über SSE) — Calendar-
+Änderungen auf dem Tablet landen dann **innerhalb weniger Sekunden** im
+Google-Kalender, nicht erst beim nächsten Polling-Cycle.
+
+In der `config.yaml` ergänzen:
+
+```yaml
+realtime:
+  enabled: true
+  debounce_seconds: 2.0   # mehrere Edits in Folge → 1 Sync
+```
+
+Bridge danach neu starten (`docker compose restart bridge`). Logs sollten
+zeigen:
+
+```
+realtime.start
+realtime.negotiate_ok
+realtime.handshake_ok
+realtime.set_filter_sent
+```
+
+Bei jedem späteren Tablet-Edit:
+
+```
+realtime.event subject=calendar/event entity_id=…
+run.realtime_trigger_scheduled debounce_seconds=2.0
+sync.start ... sync.done inserts=0 patches=1 …
+```
+
+Polling läuft trotzdem als **Safety-Net** weiter — wenn die Realtime-
+Connection mal kurz droppt, fängt der 15-Minuten-Cycle alles auf, was
+während des Disconnects passiert ist. Auto-Reconnect mit Exponential-
+Backoff bringt die Realtime-Connection in der Regel binnen Sekunden
+zurück.
+
+Keine zusätzlichen Ports nötig — die Verbindung ist outbound vom Bridge-
+Container zu `daely-connect.com`.
+
 ### Optional: Health-Endpoint aktivieren
 
 Für Docker-`HEALTHCHECK`-Direktive oder externe Uptime-Monitore (Healthchecks.io,
@@ -473,6 +516,8 @@ committen.
 
 ## Status
 
+**v1.0.0 — Stable.** Feature-complete für den primären Use-Case.
+
 | Phase | Status | Inhalt |
 |---|---|---|
 | 3a | ✅ | Live-Read & Fixture-Anonymisierung |
@@ -486,3 +531,4 @@ committen.
 | Health | ✅ | `/healthz` + `/readyz` + `/status` HTTP-Endpoints |
 | CI/CD | ✅ | GitHub Action für Tests + Release-Workflow auf `v*`-Tags |
 | Image | ✅ | Multi-Arch Dockerfile + Compose + ghcr.io-Publishing |
+| Realtime | ✅ | SignalR-Push für Sub-Sekunden-Sync-Latenz (opt-in) |

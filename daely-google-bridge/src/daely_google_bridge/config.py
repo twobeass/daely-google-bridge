@@ -53,6 +53,32 @@ class HealthServerConfig(BaseModel):
     bind_port: int = Field(default=8090, ge=1024, le=65535)
 
 
+class RealtimeConfig(BaseModel):
+    """SignalR-realtime push subscription (Daely `/realtime`).
+
+    When enabled, the bridge maintains a persistent SSE connection to
+    Daely's realtime hub and triggers a debounced incremental sync on every
+    `calendar/*` notification — replacing 15-minute polling latency with
+    sub-second propagation.
+
+    Polling stays active as a safety net; if the realtime connection drops
+    repeatedly, the periodic incremental cycle still keeps Google in sync.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = False
+    # Debounce window: multiple events arriving in quick succession coalesce
+    # into a single incremental_sync. Default 2s — short enough to feel
+    # immediate, long enough to absorb a burst of related changes.
+    debounce_seconds: float = Field(default=2.0, ge=0.0, le=60.0)
+    # Topic toggles — usually only calendars are relevant for the bridge.
+    subscribe_user_calendars: bool = True
+    subscribe_group_calendars: bool = True
+    subscribe_chores: bool = False
+    subscribe_checklists: bool = False
+
+
 class BridgeConfig(BaseModel):
     """Static configuration for one bridge instance.
 
@@ -94,6 +120,9 @@ class BridgeConfig(BaseModel):
 
     # Health-check HTTP server (off by default).
     health_server: HealthServerConfig = Field(default_factory=HealthServerConfig)
+
+    # SignalR realtime push (off by default; opt-in on top of polling).
+    realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
 
     # Sync
     poll_interval_minutes: int = 15
@@ -150,5 +179,5 @@ def save_config(cfg: BridgeConfig, path: Path | str, *, backup: bool = True) -> 
 
 __all__ = [
     "BridgeConfig", "ColorMappingConfig", "HealthServerConfig",
-    "load_config", "save_config",
+    "RealtimeConfig", "load_config", "save_config",
 ]
