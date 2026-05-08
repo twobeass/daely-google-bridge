@@ -1,9 +1,11 @@
 """Tests for store.py against in-memory SQLite."""
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from daely_google_bridge.store import Store
+from daely_google_bridge import store as store_module
+from daely_google_bridge.store import LATEST_SCHEMA_VERSION, Store
 
 
 @pytest.fixture()
@@ -205,3 +207,240 @@ def test_store_persists_to_file(tmp_path):
     s2 = Store(db_file)
     assert s2.get_token("daely").refresh_token == "rt-x"
     s2.close()
+
+
+# ────────── schema migrations (§1.3) ──────────
+
+
+def test_fresh_db_lands_at_latest_schema_version(tmp_path):
+    s = Store(tmp_path / "bridge.db")
+    try:
+        assert s.schema_version == LATEST_SCHEMA_VERSION
+        assert s.migrated_from_version == 0  # was empty before
+        assert s.last_backup_path is None  # nothing to back up
+    finally:
+        s.close()
+
+
+def test_in_memory_db_also_runs_migrations():
+    s = Store(":memory:")
+    try:
+        assert s.schema_version == LATEST_SCHEMA_VERSION
+    finally:
+        s.close()
+
+
+def test_schema_version_row_persisted(tmp_path):
+    db_file = tmp_path / "bridge.db"
+    Store(db_file).close()
+    # Read the row back via raw connection
+    conn = sqlite3.connect(str(db_file))
+    try:
+        row = conn.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+        assert row is not None
+        assert row[0] == LATEST_SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_existing_pre_framework_db_detected_as_v1(tmp_path):
+    """A db with the pre-migration baseline schema (no schema_version table)
+    must be picked up as v1 without re-running migration_001 (which would
+    fail because the tables already exist)."""
+    db_file = tmp_path / "bridge.db"
+    # Hand-craft a pre-framework db: just the original baseline schema, no
+    # schema_version table.
+    conn = sqlite3.connect(str(db_file))
+    conn.executescript("""
+        CREATE TABLE event_mapping (
+            daely_id TEXT PRIMARY KEY,
+            daely_calendar_id TEXT NOT NULL,
+            google_event_id TEXT NOT NULL,
+            google_calendar_id TEXT NOT NULL,
+            last_seen_updated TEXT,
+            last_synced_at TEXT NOT NULL,
+            failed INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE sync_state (
+            calendar_id TEXT PRIMARY KEY,
+            internal_token TEXT,
+            external_token TEXT,
+            recommended_interval_min INTEGER,
+            last_polled_at TEXT
+        );
+        CREATE TABLE tokens (
+            provider TEXT PRIMARY KEY,
+            refresh_token TEXT NOT NULL,
+            access_token TEXT,
+            expires_at TEXT
+        );
+        INSERT INTO tokens (provider, refresh_token) VALUES ('daely', 'pre-existing');
+    """)
+    conn.close()
+
+    # Open with Store — should detect v1 and not re-run migration_001
+    s = Store(db_file)
+    try:
+        assert s.schema_version == 1
+        assert s.migrated_from_version == 1  # detection only, no actual migration
+        assert s.last_backup_path is None  # no backup needed when nothing changed
+        # Pre-existing data preserved
+        assert s.get_token("daely").refresh_token == "pre-existing"
+    finally:
+        s.close()
+
+
+def test_reopen_does_not_re_migrate(tmp_path):
+    db_file = tmp_path / "bridge.db"
+    Store(db_file).close()
+    # Second open: already at latest, nothing to do
+    s2 = Store(db_file)
+    try:
+        assert s2.schema_version == LATEST_SCHEMA_VERSION
+        assert s2.migrated_from_version == LATEST_SCHEMA_VERSION
+        assert s2.last_backup_path is None
+    finally:
+        s2.close()
+
+
+def test_synthetic_v2_migration_applied_to_v1_db(tmp_path, monkeypatch):
+    """Simulate a future v2 migration to verify the framework picks it up
+    on re-open of an existing v1 db."""
+    db_file = tmp_path / "bridge.db"
+    Store(db_file).close()  # creates v1
+
+    applied = {"called": False}
+
+    def _migration_002_test(conn):
+        applied["called"] = True
+        conn.execute("CREATE TABLE synthetic_test_table (id INTEGER PRIMARY KEY)")
+
+    monkeypatch.setattr(
+        store_module, "_MIGRATIONS",
+        store_module._MIGRATIONS + [(2, _migration_002_test)],
+    )
+    monkeypatch.setattr(store_module, "LATEST_SCHEMA_VERSION", 2)
+
+    s = Store(db_file)
+    try:
+        assert applied["called"] is True
+        assert s.schema_version == 2
+        assert s.migrated_from_version == 1
+        # New table really exists
+        with s._cursor() as cur:
+            row = cur.execute(
+                "SELECT name FROM sqlite_master WHERE name='synthetic_test_table'",
+            ).fetchone()
+            assert row is not None
+    finally:
+        s.close()
+
+
+def test_synthetic_migration_writes_backup(tmp_path, monkeypatch):
+    db_file = tmp_path / "bridge.db"
+    Store(db_file).close()  # creates v1
+
+    def _migration_002_test(conn):
+        conn.execute("CREATE TABLE synthetic_test_table (id INTEGER PRIMARY KEY)")
+
+    monkeypatch.setattr(
+        store_module, "_MIGRATIONS",
+        store_module._MIGRATIONS + [(2, _migration_002_test)],
+    )
+    monkeypatch.setattr(store_module, "LATEST_SCHEMA_VERSION", 2)
+
+    s = Store(db_file)
+    try:
+        assert s.last_backup_path is not None
+        assert s.last_backup_path.exists()
+        assert s.last_backup_path.name.startswith("bridge.db.bak.v1-")
+    finally:
+        s.close()
+
+
+def test_backup_skipped_when_disabled(tmp_path, monkeypatch):
+    db_file = tmp_path / "bridge.db"
+    Store(db_file).close()  # creates v1
+
+    def _migration_002_test(conn):
+        conn.execute("CREATE TABLE synthetic_test_table (id INTEGER PRIMARY KEY)")
+
+    monkeypatch.setattr(
+        store_module, "_MIGRATIONS",
+        store_module._MIGRATIONS + [(2, _migration_002_test)],
+    )
+    monkeypatch.setattr(store_module, "LATEST_SCHEMA_VERSION", 2)
+
+    s = Store(db_file, backup_on_migrate=False)
+    try:
+        assert s.last_backup_path is None
+        # But the migration still ran
+        assert s.schema_version == 2
+    finally:
+        s.close()
+
+
+def test_backup_best_effort_swallows_oserror(tmp_path, monkeypatch):
+    """If the backup write fails (read-only parent, etc.), migrations still run."""
+    from pathlib import Path as _Path
+
+    db_file = tmp_path / "bridge.db"
+    Store(db_file).close()  # creates v1
+
+    def _migration_002_test(conn):
+        conn.execute("CREATE TABLE synthetic_test_table (id INTEGER PRIMARY KEY)")
+
+    monkeypatch.setattr(
+        store_module, "_MIGRATIONS",
+        store_module._MIGRATIONS + [(2, _migration_002_test)],
+    )
+    monkeypatch.setattr(store_module, "LATEST_SCHEMA_VERSION", 2)
+
+    real_write = _Path.write_bytes
+
+    def _selective(self, data):
+        if ".bak." in self.name:
+            raise OSError("simulated read-only parent")
+        return real_write(self, data)
+
+    monkeypatch.setattr(_Path, "write_bytes", _selective)
+
+    s = Store(db_file)  # must NOT raise
+    try:
+        assert s.schema_version == 2
+        assert s.last_backup_path is None
+    finally:
+        s.close()
+
+
+def test_existing_data_survives_migration(tmp_path, monkeypatch):
+    """Critical: writing a v2 migration doesn't lose v1 data."""
+    db_file = tmp_path / "bridge.db"
+    s = Store(db_file)
+    s.put_token(provider="daely", refresh_token="must-survive")
+    _put(s, daely_id="d-survives")
+    s.close()
+
+    def _migration_002_test(conn):
+        conn.execute("CREATE TABLE synthetic_test_table (id INTEGER PRIMARY KEY)")
+
+    monkeypatch.setattr(
+        store_module, "_MIGRATIONS",
+        store_module._MIGRATIONS + [(2, _migration_002_test)],
+    )
+    monkeypatch.setattr(store_module, "LATEST_SCHEMA_VERSION", 2)
+
+    s2 = Store(db_file)
+    try:
+        assert s2.schema_version == 2
+        assert s2.get_token("daely").refresh_token == "must-survive"
+        assert s2.get_event_mapping("d-survives") is not None
+    finally:
+        s2.close()
+
+
+def test_migration_list_versions_are_strictly_increasing():
+    """Sanity check on the canonical migration list."""
+    versions = [v for v, _ in store_module._MIGRATIONS]
+    assert versions == sorted(set(versions))
+    assert versions[0] >= 1  # 0 reserved for "fresh db"

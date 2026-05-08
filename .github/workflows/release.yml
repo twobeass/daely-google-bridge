@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: resolve tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: extract changelog section for this version
+        id: changelog
+        run: |
+          tag="${{ steps.tag.outputs.name }}"
+          version="${tag#v}"
+          # Pull the lines from `## [<version>]` up to (but not including) the
+          # next `## [...]` heading. Falls back to a generic note if no entry
+          # is found in CHANGELOG.md.
+          section=$(awk -v ver="$version" '
+            /^## \[/ {
+              if (in_section) exit
+              if ($0 ~ "^## \\[" ver "\\]") { in_section=1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md)
+
+          if [ -z "$(echo "$section" | tr -d '[:space:]')" ]; then
+            section="No CHANGELOG entry found for $tag. See git log for details."
+          fi
+
+          {
+            echo 'body<<EOF'
+            echo "$section"
+            echo ""
+            echo "---"
+            echo ""
+            echo "Container image: \`ghcr.io/${GITHUB_REPOSITORY,,}:$tag\`"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          body: ${{ steps.changelog.outputs.body }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}

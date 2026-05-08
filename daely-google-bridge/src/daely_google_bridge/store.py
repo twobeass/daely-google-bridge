@@ -1,17 +1,9 @@
 """SQLite persistence — pure stdlib, no ORM.
 
-Schema:
-
-    event_mapping(daely_id PK,
-                  daely_calendar_id,
-                  google_event_id,
-                  google_calendar_id,
-                  last_seen_updated,
-                  last_synced_at,
-                  failed)
-    sync_state(calendar_id PK, internal_token, external_token,
-               recommended_interval_min, last_polled_at)
-    tokens(provider PK, refresh_token, access_token, expires_at)
+Schema is managed by a forward-only migration framework (see `_MIGRATIONS`
+below). On `Store()` init we detect the db's current version and apply any
+outstanding migrations, with an automatic best-effort backup of file-based
+dbs before each upgrade.
 
 All writes use ON CONFLICT … DO UPDATE so each method is idempotent: calling
 put() with the same key always converges to the desired row, regardless of
@@ -37,44 +29,166 @@ Field semantics in event_mapping:
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS event_mapping (
-    daely_id            TEXT PRIMARY KEY,
-    daely_calendar_id   TEXT NOT NULL,
-    google_event_id     TEXT NOT NULL,
-    google_calendar_id  TEXT NOT NULL,
-    last_seen_updated   TEXT,
-    last_synced_at      TEXT NOT NULL,
-    failed              INTEGER NOT NULL DEFAULT 0
-);
 
-CREATE INDEX IF NOT EXISTS idx_event_mapping_daely_cal
-    ON event_mapping(daely_calendar_id);
+# ─────────────────── migration framework ───────────────────
 
-CREATE INDEX IF NOT EXISTS idx_event_mapping_google_cal
-    ON event_mapping(google_calendar_id);
-
-CREATE TABLE IF NOT EXISTS sync_state (
-    calendar_id                TEXT PRIMARY KEY,
-    internal_token             TEXT,
-    external_token             TEXT,
-    recommended_interval_min   INTEGER,
-    last_polled_at             TEXT
-);
-
-CREATE TABLE IF NOT EXISTS tokens (
-    provider        TEXT PRIMARY KEY,
-    refresh_token   TEXT NOT NULL,
-    access_token    TEXT,
-    expires_at      TEXT
+SCHEMA_VERSION_DDL = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL
 );
 """
+
+
+def _migration_001_initial(conn: sqlite3.Connection) -> None:
+    """v1 — baseline schema (event_mapping, sync_state, tokens).
+
+    Pre-framework production dbs already have this layout; the framework
+    detects them via `event_mapping` presence and stamps schema_version=1
+    without re-running this migration.
+    """
+    conn.execute("""
+        CREATE TABLE event_mapping (
+            daely_id            TEXT PRIMARY KEY,
+            daely_calendar_id   TEXT NOT NULL,
+            google_event_id     TEXT NOT NULL,
+            google_calendar_id  TEXT NOT NULL,
+            last_seen_updated   TEXT,
+            last_synced_at      TEXT NOT NULL,
+            failed              INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX idx_event_mapping_daely_cal
+            ON event_mapping(daely_calendar_id)
+    """)
+    conn.execute("""
+        CREATE INDEX idx_event_mapping_google_cal
+            ON event_mapping(google_calendar_id)
+    """)
+    conn.execute("""
+        CREATE TABLE sync_state (
+            calendar_id                TEXT PRIMARY KEY,
+            internal_token             TEXT,
+            external_token             TEXT,
+            recommended_interval_min   INTEGER,
+            last_polled_at             TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE tokens (
+            provider        TEXT PRIMARY KEY,
+            refresh_token   TEXT NOT NULL,
+            access_token    TEXT,
+            expires_at      TEXT
+        )
+    """)
+
+
+# Forward-only migration list. APPEND new entries here — never edit or delete
+# existing ones, since production dbs are at varying versions and rely on this
+# list as the canonical history. Each callable receives an open Connection.
+_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
+    (1, _migration_001_initial),
+]
+
+LATEST_SCHEMA_VERSION = _MIGRATIONS[-1][0] if _MIGRATIONS else 0
+
+
+def _detect_current_version(conn: sqlite3.Connection) -> int:
+    """Return the schema version this db is currently at.
+
+    - 0 = fresh db, no tables of ours
+    - N = `schema_version` row already says version=N
+    - 1 = pre-framework db detected via `event_mapping` presence
+    """
+    try:
+        row = conn.execute(
+            "SELECT version FROM schema_version WHERE id=1",
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    except sqlite3.OperationalError:
+        pass  # schema_version table doesn't exist yet
+    has_event_mapping = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='event_mapping'",
+    ).fetchone() is not None
+    return 1 if has_event_mapping else 0
+
+
+def _backup_db_file(db_path: str, current_version: int) -> Path | None:
+    """Best-effort copy of a file-based db before applying migrations.
+
+    Skipped for `:memory:` or empty paths and on permission errors. Returns
+    the backup Path on success, None otherwise. Naming: keeps the original
+    suffix and appends `.bak.v{N}-{timestamp}`.
+    """
+    if db_path in (":memory:", ""):
+        return None
+    p = Path(db_path)
+    if not p.exists():
+        return None
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = p.with_name(f"{p.name}.bak.v{current_version}-{ts}")
+    try:
+        backup_path.write_bytes(p.read_bytes())
+    except OSError:
+        return None
+    return backup_path
+
+
+def _apply_migrations(
+    conn: sqlite3.Connection,
+    *,
+    db_path: str,
+    backup: bool = True,
+) -> tuple[int, int, Path | None]:
+    """Bring `conn` up to LATEST_SCHEMA_VERSION.
+
+    Returns a tuple `(from_version, to_version, backup_path_or_None)`.
+    Caller can use the backup path for logging or post-migration verification.
+    """
+    from_version = _detect_current_version(conn)
+    target = LATEST_SCHEMA_VERSION
+
+    # The schema_version table is itself meta; ensure it exists before we
+    # start writing version stamps to it.
+    conn.executescript(SCHEMA_VERSION_DDL)
+
+    if from_version >= target:
+        # Nothing to do. Pin the row so future startups bypass detection.
+        conn.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+            (from_version,),
+        )
+        return (from_version, from_version, None)
+
+    # Only back up when there's actually pre-existing user data to lose.
+    # from_version==0 means an empty file just opened by sqlite — nothing to save.
+    backup_path = (
+        _backup_db_file(db_path, from_version)
+        if backup and from_version > 0
+        else None
+    )
+
+    for version, migration_fn in _MIGRATIONS:
+        if version > from_version:
+            migration_fn(conn)
+            conn.execute(
+                "INSERT INTO schema_version (id, version) VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+                (version,),
+            )
+
+    return (from_version, target, backup_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +230,20 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 class Store:
-    """SQLite-backed persistence for the bridge."""
+    """SQLite-backed persistence for the bridge.
 
-    def __init__(self, db_path: str | Path = ":memory:") -> None:
+    Migrations are applied automatically on init. `backup_on_migrate=True`
+    (default) writes a sibling `.bak.v<N>-<timestamp>` file before any
+    upgrade actually runs, so a botched migration leaves the user with a
+    recoverable copy.
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        *,
+        backup_on_migrate: bool = True,
+    ) -> None:
         self._path = str(db_path)
         self._conn = sqlite3.connect(
             self._path,
@@ -128,7 +253,30 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(SCHEMA)
+        self._migration_result = _apply_migrations(
+            self._conn, db_path=self._path, backup=backup_on_migrate,
+        )
+
+    @property
+    def schema_version(self) -> int:
+        """The schema version this Store is currently operating at."""
+        return self._migration_result[1]
+
+    @property
+    def migrated_from_version(self) -> int:
+        """The schema version this db was at before init applied migrations.
+
+        Useful for callers that want to log/announce upgrades — equal to
+        `schema_version` if no migrations were run on this open.
+        """
+        return self._migration_result[0]
+
+    @property
+    def last_backup_path(self) -> Path | None:
+        """Filesystem path of the pre-migration backup written on this open,
+        or None if no backup was created (fresh db, :memory:, or no migrations
+        needed)."""
+        return self._migration_result[2]
 
     # ─────────────── lifecycle ───────────────
 
@@ -316,6 +464,7 @@ class Store:
 
 
 __all__ = [
+    "LATEST_SCHEMA_VERSION",
     "EventMapping",
     "Store",
     "SyncState",
