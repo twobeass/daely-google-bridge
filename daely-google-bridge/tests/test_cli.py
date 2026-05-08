@@ -302,6 +302,275 @@ def test_main_dispatches_recolor(tmp_path, capsys):
     assert "dry-run" in out
 
 
+# ────────── doctor ──────────
+
+from daely_google_bridge.cli import cmd_doctor  # noqa: E402  imported here for test grouping
+
+
+def _doctor_fixture_full(tmp_path, *, with_tokens: bool = True,
+                         with_mappings: bool = True,
+                         with_recent_sync: bool = True,
+                         poll_interval_minutes: int = 15):
+    """Build a config + Store and seed it with a known-good state."""
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    cfg = BridgeConfig(
+        daely_email="t@example.com",
+        google_oauth_client_secrets_file=secrets,
+        db_path=tmp_path / "bridge.db",
+        log_format="text",
+        profile_calendar_mapping={"prof-A": "cal-A"},
+        fallback_google_calendar_id="cal-fb",
+        poll_interval_minutes=poll_interval_minutes,
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+
+    s = Store(cfg.db_path)
+    if with_tokens:
+        s.put_token(provider="daely", refresh_token="rt-d")
+        s.put_token(provider="google", refresh_token="rt-g")
+    if with_mappings:
+        from datetime import datetime, timezone
+        seen = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+        s.put_event_mapping(
+            daely_id="d1", daely_calendar_id="cal-A",
+            google_event_id="g1", google_calendar_id="gcal-A",
+            last_seen_updated=seen,
+        )
+    if with_recent_sync:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        s.record_sync_history(
+            run_id="recent-run-1",
+            started_at=now,
+            completed_at=now,
+            duration_seconds=1.0,
+            inserts=1, patches=0, deletes=0, no_ops=2,
+            skipped_external=0, skipped_no_target=0,
+            errors=[],
+        )
+    s.close()
+    return config_path, cfg.db_path
+
+
+def test_doctor_all_green(tmp_path, capsys):
+    config_path, _ = _doctor_fixture_full(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = False
+    rc = cmd_doctor(args)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Overall: OK" in out
+    # All checks should be [OK]
+    assert "[FAIL]" not in out
+    assert "[WARN]" not in out
+    assert "config:" in out
+    assert "database:" in out
+    assert "daely refresh-token:" in out
+    assert "google refresh-token:" in out
+    assert "event mappings:" in out
+    assert "last sync:" in out
+
+
+def test_doctor_no_config_returns_fail(tmp_path, capsys):
+    args = MagicMock()
+    args.config = str(tmp_path / "missing.yaml")
+    args.live = False
+    rc = cmd_doctor(args)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "[FAIL]" in out
+    assert "config:" in out
+    assert "bootstrap" in out.lower()
+
+
+def test_doctor_missing_tokens_fail(tmp_path, capsys):
+    config_path, _ = _doctor_fixture_full(tmp_path, with_tokens=False)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = False
+    rc = cmd_doctor(args)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "Overall: FAIL" in out
+    assert "[FAIL] daely refresh-token:" in out
+    assert "[FAIL] google refresh-token:" in out
+
+
+def test_doctor_no_sync_yet_warns(tmp_path, capsys):
+    config_path, _ = _doctor_fixture_full(tmp_path, with_recent_sync=False)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = False
+    rc = cmd_doctor(args)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "Overall: WARN" in out
+    assert "no sync recorded yet" in out
+
+
+def test_doctor_stale_sync_warns(tmp_path, capsys):
+    """Last sync older than 2× poll_interval should yield a WARN."""
+    config_path, db_path = _doctor_fixture_full(tmp_path, with_recent_sync=False)
+    # Inject an old sync history row directly
+    from datetime import datetime, timedelta, timezone
+    s = Store(db_path)
+    old = datetime.now(timezone.utc) - timedelta(hours=2)
+    s.record_sync_history(
+        run_id="old-run", started_at=old, completed_at=old,
+        duration_seconds=1.0, inserts=0, patches=0, deletes=0, no_ops=0,
+        skipped_external=0, skipped_no_target=0, errors=[],
+    )
+    s.close()
+
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = False
+    rc = cmd_doctor(args)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "Overall: WARN" in out
+    assert "stale" in out.lower()
+
+
+def test_doctor_failed_mappings_warn(tmp_path, capsys):
+    config_path, db_path = _doctor_fixture_full(tmp_path)
+    s = Store(db_path)
+    s.put_event_mapping(
+        daely_id="d-broken", daely_calendar_id="cal-A",
+        google_event_id="g-broken", google_calendar_id="gcal-A",
+    )
+    s.record_event_error("d-broken", error_msg="oh no")
+    s.close()
+
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = False
+    rc = cmd_doctor(args)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "Overall: WARN" in out
+    assert "[WARN] event mappings:" in out
+    assert "1 failed" in out
+
+
+def test_doctor_no_profile_mapping_no_fallback_fails(tmp_path, capsys):
+    """A bridge with no profile mapping AND no fallback would skip everything."""
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    cfg = BridgeConfig(
+        daely_email="t@example.com",
+        google_oauth_client_secrets_file=secrets,
+        db_path=tmp_path / "bridge.db",
+        log_format="text",
+        # No profile_calendar_mapping, no fallback
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+    s = Store(cfg.db_path)
+    s.put_token(provider="daely", refresh_token="rt-d")
+    s.put_token(provider="google", refresh_token="rt-g")
+    s.close()
+
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = False
+    rc = cmd_doctor(args)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] config mapping:" in out
+    assert "Overall: FAIL" in out
+
+
+def test_doctor_live_check_all_green(tmp_path, capsys):
+    config_path, _ = _doctor_fixture_full(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = True
+
+    fake_daely = MagicMock()
+    fake_daely.refresh.return_value = {"expires_in": 300}
+    fake_daely.refresh_token = "rt-d-rotated"
+    fake_daely.access_token = "at-d-new"
+
+    fake_google = MagicMock()
+    fake_google.list_calendars.return_value = [
+        {"id": "cal-A"}, {"id": "cal-B"}, {"id": "cal-fb"},
+    ]
+
+    rc = cmd_doctor(
+        args,
+        daely_factory=lambda c: fake_daely,
+        google_factory=lambda s, c: fake_google,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Overall: OK" in out
+    assert "[OK]   daely live refresh:" in out
+    assert "expires_in=300" in out
+    assert "[OK]   google live ping:" in out
+    assert "3 calendars" in out
+
+
+def test_doctor_live_daely_refresh_failure_fails(tmp_path, capsys):
+    from daely_google_bridge.daely_client import DaelyAuthError
+    config_path, _ = _doctor_fixture_full(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = True
+
+    fake_daely = MagicMock()
+    fake_daely.refresh.side_effect = DaelyAuthError("invalid_grant: token revoked")
+    fake_google = MagicMock()
+    fake_google.list_calendars.return_value = []
+
+    rc = cmd_doctor(
+        args,
+        daely_factory=lambda c: fake_daely,
+        google_factory=lambda s, c: fake_google,
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[FAIL] daely live refresh:" in out
+    assert "invalid_grant" in out
+    assert "Overall: FAIL" in out
+
+
+def test_doctor_live_google_failure_fails(tmp_path, capsys):
+    config_path, _ = _doctor_fixture_full(tmp_path)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.live = True
+
+    fake_daely = MagicMock()
+    fake_daely.refresh.return_value = {"expires_in": 300}
+    fake_daely.refresh_token = "rt-d"
+    fake_daely.access_token = "at-d"
+
+    fake_google = MagicMock()
+    fake_google.list_calendars.side_effect = RuntimeError("403 forbidden")
+
+    rc = cmd_doctor(
+        args,
+        daely_factory=lambda c: fake_daely,
+        google_factory=lambda s, c: fake_google,
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[FAIL] google live ping:" in out
+    assert "403 forbidden" in out
+
+
+def test_main_dispatches_doctor(tmp_path, capsys):
+    config_path, _ = _doctor_fixture_full(tmp_path)
+    rc = main(["-c", str(config_path), "doctor"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Overall: OK" in out
+
+
 # ────────── bootstrap dry-run ──────────
 
 @pytest.fixture()

@@ -31,8 +31,8 @@ solide Companion-App. Was uns aber gefehlt hat:
    weil Daely seinen eigenen Backend-Speicher hat.
 2. **Home-Assistant-Integration**. HA hat eine fertige Google-Calendar-
    Integration, mit der man Automationen an Termine hängen kann
-   („wenn morgen Schwimmunterricht ist, leg den Schwimmrucksack-Reminder
-   um 7:30 in die Sprechblase"). Ohne Daely → Google geht das nicht.
+   („wenn morgen ein Termin ansteht, schalte um 7:30 das passende
+   Status-Display ein"). Ohne Daely → Google geht das nicht.
 3. **Bestehende Workflows**. Mein Smartphone, mein Auto-Display, mein
    Google-Account-Setup mit anderen Familienmitgliedern — alles spricht
    bereits Google Calendar.
@@ -49,8 +49,7 @@ App, nicht dieser Bridge.)
 
 ## Was du brauchst
 
-- Ein **Dæly-Account** (Email + Passwort, **kein MFA** — siehe
-  *Einschränkungen* unten).
+- Ein **Dæly-Account** (Email + Passwort).
 - Ein **Google-Cloud-Projekt** mit aktivierter Calendar API und einem
   OAuth-2.0-*Desktop-Client*. Wie genau du das anlegst, steht im nächsten
   Abschnitt.
@@ -247,10 +246,55 @@ löst das beim Callback wieder auf den richtigen Listener auf.
    bringen willst, ist das Daelys eingebaute Google-/CalDAV-Integration
    in der offiziellen App.\
 ❌ **Keine Photo-Sync**. Daelys 15-Bilder-Limit ist ein eigenes Thema und
-   nicht Teil dieser Bridge.\
-❌ **Kein MFA-Support**. Der Login nutzt ROPC (Resource Owner Password
-   Credentials), das funktioniert mit Keycloak nicht bei aktiviertem MFA.
-   Workaround: MFA für den Account aus, der die Bridge nutzt.
+   nicht Teil dieser Bridge.
+
+## Bedienung — die wichtigsten Commands
+
+Alle Commands rufst du gegen den laufenden Container auf, z. B.:
+
+```bash
+docker compose exec bridge bridge <command> [args]
+```
+
+| Command                                    | Was es macht                                                                                              |
+|--------------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `bridge bootstrap`                         | Einmal-Setup: Daely-Login, Google-OAuth, anlegen der Sub-Kalender pro Profil. Schreibt in `config.yaml`.  |
+| `bridge run`                               | Daemon-Modus — initialer Full-Sync, dann Polling alle `poll_interval_minutes`. Wird vom Container-Entrypoint aufgerufen. |
+| `bridge run --once`                        | Genau ein Full-Sync, dann Exit. Praktisch für Cron oder Tests.                                            |
+| `bridge status`                            | Quick-Look: Tokens vorhanden? Wie viele Mappings? Letztes Sync-Timestamp?                                 |
+| `bridge doctor`                            | Health-Diagnose mit `[OK]`/`[WARN]`/`[FAIL]`-Markern: Config, DB-Schema, Tokens, Mappings, Sync-Alter, Error-Trend. Exit-Code 0/1/2. |
+| `bridge doctor --live`                     | Wie oben **plus** Live-Refresh des Daely-Tokens und Google-`list_calendars`-Ping. Braucht Netzwerk.       |
+| `bridge resync [--calendar <daely-cal-id>] [--dry-run]` | Setzt `last_seen_updated=NULL` auf den passenden Mappings, sodass der nächste Sync sie mit aktueller Mapper-Logik re-patcht. |
+| `bridge re-color [--dry-run]`              | Convenience-Alias für `bridge resync` ohne Calendar-Filter — discoverable Shortcut nach Color-Mapping-Änderungen. |
+
+**Beispiel — schauen, ob alles passt:**
+
+```bash
+docker compose exec bridge bridge doctor
+```
+
+```
+bridge doctor — health checks (config: /app/config.yaml)
+
+[OK]   config:                   loaded (you@example.com)
+[OK]   database:                 schema v2 at /data/bridge.db
+[OK]   daely refresh-token:      present in store
+[OK]   google refresh-token:     present in store
+[OK]   event mappings:           41 total
+[OK]   last sync:                3m ago, run abc123def456 (+0/~2/-0, 0 errors)
+[OK]   sync error trend:         no errors across last 10 run(s)
+[OK]   config mapping:           4 profile entries, fallback set
+
+Overall: OK
+```
+
+Bei `[FAIL]` ist der Exit-Code `1`, bei `[WARN]` `2` — kannst du also direkt
+für Cron-Health-Checks verwenden:
+
+```bash
+# crontab: stündlicher Health-Check, mailt bei FAIL
+0 * * * * docker compose exec -T bridge bridge doctor || mail -s "Bridge unwell" you@example.com
+```
 
 ## Update auf eine neue Version
 
@@ -382,7 +426,22 @@ also kein üblicher Decompiler-Workflow. Stattdessen:
    Mock-Tests, dann Sync-Orchestrator, dann OAuth + CLI, dann Docker
    inklusive GitHub-Actions-Pipeline für das Image.
 
-Alle 131 Tests laufen offline. Keine Live-Calls in CI.
+Alle Tests laufen offline (gemockte Daely- und Google-Clients). Keine
+Live-Calls in CI.
+
+## Versionen & Changelog
+
+- **Vollständige Historie:** [`CHANGELOG.md`](CHANGELOG.md) — folgt
+  [Keep-A-Changelog](https://keepachangelog.com/de/1.1.0/).
+- **GitHub Releases:** <https://github.com/twobeass/daely-google-bridge/releases>
+- **Image-Tags pinnen:** jedes Release bekommt zusätzlich zum `:latest`-Tag
+  einen versionierten Tag (`:v0.1.0`, `:v0.2.0`, …). In deiner
+  `docker-compose.yml`:
+  ```yaml
+  image: ghcr.io/twobeass/daely-google-bridge:v0.1.0
+  ```
+  Vorteil: Updates passieren nur, wenn du den Tag im Compose-File explizit
+  hochziehst — kein `:latest`-Drift.
 
 ## Disclaimer
 
@@ -421,5 +480,9 @@ committen.
 | 3c | ✅ | HTTP-Clients + Bootstrap-CLI |
 | 3d | ✅ | Sync-Orchestrator + Scheduler |
 | 3e | ✅ | Profil-Footer in Event-Description |
-| 3f | ✅ | Dockerfile + Compose + ghcr.io-Publishing |
-| nächste | — | `bridge resync <cal_id>` für Force-Re-Push einzelner Kalender |
+| 3f | ✅ | Profil-Color → Google `colorId` + Multi-Participant-Title-Prefix |
+| Ops | ✅ | Schema-Migration-Framework, Retry-Loop, Sync-History |
+| Tools | ✅ | `bridge resync` / `bridge re-color` / `bridge doctor` |
+| Health | ✅ | `/healthz` + `/readyz` + `/status` HTTP-Endpoints |
+| CI/CD | ✅ | GitHub Action für Tests + Release-Workflow auf `v*`-Tags |
+| Image | ✅ | Multi-Arch Dockerfile + Compose + ghcr.io-Publishing |

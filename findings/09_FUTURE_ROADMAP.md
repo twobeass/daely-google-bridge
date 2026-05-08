@@ -12,22 +12,25 @@ Google-Calendar-Widgets, Home Assistant und sonstigen Google-integrierten
 Tools**. Mit Phase 3f (Profil-Farben + Multi-Participant-Emoji-Prefix) ist
 auch die letzte UX-Limitation aus der ursprünglichen Mission erschlagen.
 
-Was jetzt sinnvoll wäre, sortiert sich grob in vier Cluster:
+Was jetzt sinnvoll wäre, sortiert sich grob in drei Cluster:
 
 1. **Robustheit-Plus** — Schema-Migrations, Retry-Loop, Health-Endpoint,
-   `bridge resync`/`bridge re-color`-Commands. Niedrig-hängende Früchte,
-   die den 24/7-Betrieb netter machen ohne neue Features zu erfordern.
-2. **MFA-Support via Device-Code-Flow** — die einzige harte funktionale
-   Limitation der Bridge. Ohne diese Erweiterung kann der User MFA auf
-   seinem Daely-Account nicht aktivieren.
-3. **Reicheres Mapping** — Reminder-Optionen, Recurring-Instance-Overrides,
+   `bridge resync`/`bridge re-color`/`bridge doctor`-Commands. Niedrig-
+   hängende Früchte, die den 24/7-Betrieb netter machen ohne neue Features
+   zu erfordern. **Stand v0.1.0: alle umgesetzt.**
+2. **Reicheres Mapping** — Reminder-Optionen, Recurring-Instance-Overrides,
    konfigurierbare Description-Templates, optionale Location-Geocoding.
    Inkrementelle UX-Wins.
-4. **Photo-Bridge** — das ursprüngliche Mission-Ziel, nie umgesetzt. Hoher
+3. **Photo-Bridge** — das ursprüngliche Mission-Ziel, nie umgesetzt. Hoher
    Aufwand, mittlerer Wert für den aktuellen Use-Case (Widgets sind gelöst).
 
 Reverse-Sync (Google → Daely) und Multi-Mandanten-Hosting bleiben **bewusst
 out-of-scope** — siehe §11.
+
+> **Update 2026-05-08:** Der zuvor als "harte Limitation" gelistete Punkt
+> *MFA-Support via Device-Code-Flow* (§2.1) ist obsolet — Daely bietet User-
+> seitig kein MFA an. ROPC läuft stabil. Sollte sich das je ändern, ist
+> der Pfad in §2.1 als Referenz erhalten geblieben.
 
 ---
 
@@ -68,13 +71,13 @@ inkl. Tests + Doku):
 | #     | Feature                                          | Cluster   | Wert | Kompl. | Risiko | Status   | Empfehlung    |
 |-------|--------------------------------------------------|-----------|:----:|:------:|:------:|----------|---------------|
 | 1.1   | Echtzeit-Sync via Daely-SSE (`realtime`)         | Engine    | ★★☆  | L      | 🟡     | open     | Maybe         |
-| 1.2   | Retry-Loop für `failed=true`-Mappings            | Engine    | ★★☆  | S      | 🟢     | scoped   | **Go**        |
-| 1.3   | Schema-Migrations für SQLite                     | Engine    | ★★★  | S      | 🟢     | open     | **Go (next)** |
-| 1.4   | Health-Check-HTTP-Endpoint                       | Engine    | ★★☆  | S      | 🟢     | open     | **Go**        |
+| 1.2   | Retry-Loop für `failed=true`-Mappings            | Engine    | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
+| 1.3   | Schema-Migrations für SQLite                     | Engine    | ★★★  | S      | 🟢     | **done v0.1.0** | —         |
+| 1.4   | Health-Check-HTTP-Endpoint                       | Engine    | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 1.5   | Prometheus-Metrics-Exporter                      | Engine    | ★☆☆  | M      | 🟢     | open     | Maybe         |
 | 1.6   | Multi-Account-Setup (mehrere Daely-Logins)       | Engine    | ★☆☆  | L      | 🟡     | open     | No (yet)      |
 | 1.7   | Quota-aware Backoff für Google                   | Engine    | ★☆☆  | S      | 🟢     | partial  | Maybe         |
-| 2.1   | Device-Code-Flow statt ROPC (MFA-Support)        | Auth      | ★★★  | M      | 🟡     | open     | **Go (Q3)**   |
+| 2.1   | Device-Code-Flow statt ROPC (MFA-Support)        | Auth      | ☆☆☆  | M      | 🟡     | obsolete | No (Daely bietet kein MFA) |
 | 2.2   | Token-Encryption-at-Rest in SQLite               | Auth      | ★☆☆  | M      | 🟢     | open     | No            |
 | 3.1   | Recurring-Instance-Overrides (Modified Instances)| Mapping   | ★★☆  | L      | 🟡     | open     | Maybe         |
 | 3.2   | Reicheres Reminder-Mapping (multi-method)        | Mapping   | ★☆☆  | S      | 🟢     | open     | Maybe         |
@@ -86,22 +89,22 @@ inkl. Tests + Doku):
 | 3.8   | i18n (Footer-Text, Datums-Format)                | Mapping   | ★☆☆  | S      | 🟢     | open     | No            |
 | 4.1   | Foto-Upload-Bridge (ursprüngliches Mission-Ziel) | Photos    | ★★☆  | XL     | 🔴     | open     | Maybe (later) |
 | 4.2   | Foto-Source-Adapter (Google Photos, lokal)       | Photos    | ★★☆  | L      | 🟡     | open     | Hängt an 4.1  |
-| 5.1   | `bridge resync <cal_id>` als echter Command      | CLI       | ★★☆  | S      | 🟡     | scoped   | **Go**        |
-| 5.2   | `bridge re-color` Convenience-Command            | CLI       | ★★☆  | S      | 🟢     | open     | **Go**        |
+| 5.1   | `bridge resync <cal_id>` als echter Command      | CLI       | ★★☆  | S      | 🟡     | **done v0.1.0** | —         |
+| 5.2   | `bridge re-color` Convenience-Command            | CLI       | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 5.3   | `bridge profile list/show` Inspection-Commands   | CLI       | ★☆☆  | S      | 🟢     | open     | Maybe         |
-| 5.4   | `bridge doctor` Health-Diagnose-Command          | CLI       | ★★☆  | S      | 🟢     | open     | Maybe         |
+| 5.4   | `bridge doctor` Health-Diagnose-Command          | CLI       | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 5.5   | Web-UI (Bootstrap + Status-Dashboard)            | UX        | ★★☆  | XL     | 🟡     | open     | No (yet)      |
-| 6.1   | GitHub Action für `pytest` in CI                 | CI        | ★★★  | S      | 🟢     | open     | **Go (now)**  |
+| 6.1   | GitHub Action für `pytest` in CI                 | CI        | ★★★  | S      | 🟢     | **done v0.1.0** | —         |
 | 6.2   | Coverage-Gate (Codecov o. ä.)                    | CI        | ★☆☆  | S      | 🟢     | open     | Maybe         |
 | 6.3   | Integration-Tests gegen Mock-Daely-Server        | CI        | ★★☆  | L      | 🟢     | open     | Maybe         |
-| 6.4   | Release-Tagging-Workflow + Changelog             | CI        | ★★☆  | S      | 🟢     | open     | **Go**        |
+| 6.4   | Release-Tagging-Workflow + Changelog             | CI        | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 7.x   | Reverse-Sync (Google → Daely)                    | Sync      | —    | XL     | 🔴     | n/a      | **No**        |
 | 8.1   | Apple Calendar (CalDAV) als Alternativ-Target    | Provider  | ★☆☆  | L      | 🟡     | open     | No            |
 | 8.2   | Microsoft Outlook als Alternativ-Target          | Provider  | ★☆☆  | L      | 🟡     | open     | No            |
 | 8.3   | Native `.ics`-Export-Endpoint                    | Provider  | ★★☆  | M      | 🟢     | open     | Maybe         |
 | 9.1   | Home Assistant Custom-Integration                | Ecosystem | ★★☆  | L      | 🟢     | open     | Maybe         |
 | 9.2   | Notification-Webhooks (Slack/Discord/Mail)       | Ecosystem | ★☆☆  | M      | 🟢     | open     | No            |
-| 10.1  | Sync-History-Tabelle (Audit-Log)                 | Audit     | ★★☆  | S      | 🟢     | open     | **Go**        |
+| 10.1  | Sync-History-Tabelle (Audit-Log)                 | Audit     | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 10.2  | Lokale JSON-Backups der Daely-Events             | Audit     | ★☆☆  | S      | 🟢     | open     | Maybe         |
 
 **Lese-Hilfe:** „Go" = klare Empfehlung, „Maybe" = lohnt Diskussion, „No" =
@@ -256,11 +259,15 @@ Google's Best-Practice. `tenacity`-Lib oder hand-rolled.
 
 ## 2 — Authentifizierung & Security
 
-### 2.1 Device-Code-Flow statt ROPC (MFA-Support)
+### 2.1 Device-Code-Flow statt ROPC (MFA-Support) — *obsolet*
+
+> **Stand 2026-05-08: kein Handlungsbedarf.** Daely bietet User-seitig
+> aktuell keine MFA-Aktivierung an, ROPC läuft stabil. Die Sektion bleibt
+> als Referenz, falls Daely das je ändern sollte.
 
 **Was.** Die Bridge nutzt heute Resource-Owner-Password-Credentials gegen
-Keycloak. Funktioniert **nicht** wenn der User MFA aktiviert. Aktuell ist
-das die einzige harte funktionale Limitation.
+Keycloak. Würde Daely je MFA aktivieren, würde ROPC mit `invalid_grant`
+scheitern.
 
 **Wie.** Keycloak unterstützt OIDC Device-Code-Flow (`device_authorization_endpoint`
 in der OIDC-Discovery-Response). Bootstrap-Flow:
@@ -278,11 +285,12 @@ verfügbar ist. Falls Daely's Realm es nicht aktiviert hat, dann ist's nicht
 machbar — Plan-B wäre dann ein Frida-Hook in der echten App, was außerhalb
 unserer Self-Stop-Kriterien liegt.
 
-**Wert/Aufwand.** **Wert ★★★, Komplexität M** (~1.5 Tage inkl.
-Bootstrap-Refactor). Hebt die einzige harte Limitation der Bridge auf.
+**Wert/Aufwand.** Bei aktivem MFA-Zwang wäre **Wert ★★★**, sonst Wert ☆☆☆.
+**Komplexität M** (~1.5 Tage inkl. Bootstrap-Refactor).
 
-**Empfehlung.** **Go**, sobald die OIDC-Discovery-Probe bestätigt, dass
-Device-Flow am Realm aktiv ist. Das ist 1 Curl-Call, 0 Risiko.
+**Empfehlung.** *No, solange Daely kein MFA anbietet.* Falls sich das ändert:
+sobald die OIDC-Discovery-Probe bestätigt, dass Device-Flow am Realm aktiv
+ist (1 Curl-Call, 0 Risiko), umsetzen.
 
 ---
 
@@ -872,44 +880,39 @@ echten Familien-Tablet.
 
 ## 12 — Empfohlene Prio-Reihenfolge
 
-### Sofort (next 1–2 Wochen, ~1 Tag Tool-Time)
+### In v0.1.0 erledigt (2026-05-08)
 
-Diese sind allesamt klein, niedrig-Risiko, und richten Hygiene-Probleme ein,
-die spätere Erweiterungen brauchen:
+Robustheit-Plus + Operations-Komfort komplett umgesetzt:
 
-1. **§6.1** GitHub Action für `pytest` in CI — quality gate.
-2. **§1.3** Schema-Migrations für SQLite — Voraussetzung für 1.2 + 10.1.
-3. **§6.4** Release-Tagging-Workflow — saubere Update-Hygiene.
+- **§1.2** Retry-Loop, **§1.3** Schema-Migrations, **§1.4** Health-Endpoint
+- **§5.1** `bridge resync`, **§5.2** `bridge re-color`,
+  **§5.4** `bridge doctor`
+- **§6.1** GitHub-Action `pytest`-Gate, **§6.4** Release-Tagging
+- **§10.1** Sync-History-Tabelle
 
-### Kurzfristig (next month, ~2–3 Tage)
+### Obsolet
 
-Operations-Komfort, der den 24/7-Betrieb netter macht:
-
-4. **§5.1 + §5.2** `bridge resync` + `bridge re-color` Commands.
-5. **§1.2** Retry-Loop für `failed=true`-Mappings (braucht 1.3).
-6. **§1.4** Health-Check-HTTP-Endpoint.
-7. **§10.1** Sync-History-Tabelle (braucht 1.3).
-
-### Mittelfristig (Q3 2026, ~1 Woche)
-
-Adressiert die einzige harte funktionale Limitation:
-
-8. **§2.1** Device-Code-Flow für MFA-Support — vorab OIDC-Discovery-Probe.
+- **§2.1** Device-Code-Flow für MFA — Daely bietet kein MFA an, ROPC läuft
+  stabil. Sektion bleibt als Referenz, falls sich das je ändert.
 
 ### Langfristig / Maybe-never
 
 Alles andere; in Reihenfolge persönlicher Neugierde, nicht nach UX-Wert:
 
-9. §3.1 Recurring-Instance-Overrides — wenn Pain-Point auftaucht
-10. §8.3 `.ics`-Export-Endpoint — wenn HA-Integration relevant wird
-11. §4.1 + §4.2 Photo-Bridge — wenn das ursprüngliche Mission-Ziel
-    wieder hochkommt
-12. §1.1 Echtzeit-Sync via SSE — wenn Polling-Latenz konkret stört
+1. §3.1 Recurring-Instance-Overrides — wenn Pain-Point auftaucht
+2. §8.3 `.ics`-Export-Endpoint — wenn HA-Integration relevant wird
+3. §5.3 `bridge profile list/show` — Diagnose-Komfort, sehr klein
+4. §4.1 + §4.2 Photo-Bridge — wenn das ursprüngliche Mission-Ziel
+   wieder hochkommt
+5. §1.1 Echtzeit-Sync via SSE — wenn Polling-Latenz konkret stört
+6. §6.3 Integration-Tests gegen Mock-Daely-Server — wenn ein Bug
+   auftaucht, der mit respx-Stubs nicht reproduzierbar ist
+7. §3.7 Konfigurierbare Description-Templates — falls jemand i18n braucht
 
 ### Nicht empfohlen
 
-§1.6, §2.2, §3.3, §3.4, §3.8, §5.5, §7.x, §8.1, §8.2, §9.2, §11.x —
-siehe jeweilige Detail-Sektion.
+§1.6, §2.1 (obsolet), §2.2, §3.3, §3.4, §3.8, §5.5, §7.x, §8.1, §8.2,
+§9.2, §11.x — siehe jeweilige Detail-Sektion.
 
 ---
 

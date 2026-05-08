@@ -114,7 +114,12 @@ Vollständig vom User abgerufen am 2026-05-07:
 
 ## Offene Punkte
 1. **Token-Lebensdauer**: nicht aus Discovery ersichtlich (dort steht nicht). Default-Keycloak: AT 5 Min, RT 30 Min (sliding) oder dauerhaft (mit `offline_access`). Lässt sich beim ersten echten Token-Aufruf in `expires_in` ablesen.
-2. **MFA aktiviert?**: Discovery sagt nichts. Erst echter Login-Request zeigt's. ROPC bei aktiviertem MFA scheitert mit `invalid_grant` + spezifischer Error-Description.
+2. **MFA aktiviert?**: Discovery sagt nichts. Live-Beobachtung über mehrere
+   Monate Bridge-Betrieb: Daely bietet User-seitig keine MFA-Aktivierung an,
+   ROPC läuft stabil. Sollte das je geändert werden, würde der Login mit
+   `invalid_grant` + spezifischer Error-Description scheitern, und der Wechsel
+   auf Device-Code-Flow (`device_authorization_endpoint` aus der Discovery)
+   wäre der saubere Pfad.
 3. **`acr_values_supported: ["0", "1"]`**: Bedeutet, dass der Server „Authentication Context Class Reference" 0/1 unterstützt – kann für gestaffelte Auth-Levels relevant werden, aber Companion-App-Login ist üblicherweise acr=1.
 4. **Phase-3-Test**: Mit Test-Account `~/.daely-secrets/credentials.env` einen ROPC-Login als ersten Live-Call machen, dann Token in `~/.daely-secrets/` cachen. Vor dem Aufruf User-Freigabe einholen (CLAUDE.md-Regel).
 

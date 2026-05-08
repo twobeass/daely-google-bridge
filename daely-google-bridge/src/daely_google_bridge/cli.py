@@ -4,6 +4,7 @@ Subcommands:
     bridge bootstrap                  Interactive setup: Daely login, Google OAuth, sub-calendars.
     bridge run [--once]               Run the sync loop.
     bridge status                     Show what the Store knows about state.
+    bridge doctor [--live]            Run a series of health checks; optional live ping.
     bridge resync [--calendar <id>]   Force a re-patch of mappings on the next cycle.
     bridge re-color                   Alias for `resync` (clear, discoverable name).
 
@@ -11,6 +12,11 @@ Subcommands:
 on existing event_mapping rows so the next `bridge run` patches them with
 the current mapper output. The actual Google calls happen on the next
 sync cycle, not in the resync command itself.
+
+`doctor` runs purely local checks by default (DB schema, tokens, mappings,
+last sync age, recent error trend). `--live` adds a Daely refresh + a
+Google list-calendars ping — useful before an Update or for diagnosing
+"why is sync stuck".
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ import shutil
 import signal
 import sys
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -528,6 +535,256 @@ def cmd_recolor(args: argparse.Namespace) -> int:
     return cmd_resync(args)
 
 
+# ─────────────── doctor ───────────────
+
+# Status markers and exit-code mapping for cmd_doctor.
+DOCTOR_OK = "[OK]  "
+DOCTOR_WARN = "[WARN]"
+DOCTOR_FAIL = "[FAIL]"
+DOCTOR_EXIT_OK = 0
+DOCTOR_EXIT_FAIL = 1
+DOCTOR_EXIT_WARN = 2
+
+
+def _doctor_print(marker: str, label: str, message: str) -> None:
+    """Format one health-check line. Label gets padded to 26 chars."""
+    print(f"{marker} {label:<26}{message}")
+
+
+def cmd_doctor(
+    args: argparse.Namespace,
+    *,
+    daely_factory: Callable[[BridgeConfig], DaelyClient] | None = None,
+    google_factory: Callable[[Store, BridgeConfig], GoogleClient] | None = None,
+) -> int:
+    """Run a battery of health checks; print results and return an exit code.
+
+    Local-only by default (no network). With `--live` also exercises the
+    Daely refresh-token endpoint and a benign Google `list_calendars()`
+    call — useful before deploying an update or for diagnosing a stuck sync.
+
+    Exit codes:
+      0 = all green
+      1 = at least one check FAILed (config missing, tokens absent, live error)
+      2 = at least one check WARNed (stale sync, recurring failures, …)
+    """
+    config_path = Path(args.config or DEFAULT_CONFIG_PATH)
+    print(f"bridge doctor — health checks (config: {config_path})\n")
+
+    # ── (1) config load ──
+    if not config_path.exists():
+        _doctor_print(DOCTOR_FAIL, "config:",
+                      f"not found at {config_path}. Run `bridge bootstrap` first.")
+        return DOCTOR_EXIT_FAIL
+    try:
+        cfg = load_config(config_path)
+    except Exception as e:
+        _doctor_print(DOCTOR_FAIL, "config:", f"invalid: {e}")
+        return DOCTOR_EXIT_FAIL
+    _doctor_print(DOCTOR_OK, "config:", f"loaded ({cfg.daely_email})")
+
+    # ── (2) database ──
+    try:
+        store = Store(cfg.db_path)
+    except Exception as e:
+        _doctor_print(DOCTOR_FAIL, "database:", f"could not open {cfg.db_path}: {e}")
+        return DOCTOR_EXIT_FAIL
+    _doctor_print(DOCTOR_OK, "database:",
+                  f"schema v{store.schema_version} at {cfg.db_path}")
+
+    overall = DOCTOR_EXIT_OK
+    daely_token = store.get_token(DAELY_TOKEN_PROVIDER)
+    google_token = store.get_token(TOKEN_PROVIDER)
+
+    # ── (3) tokens ──
+    if daely_token is None:
+        _doctor_print(DOCTOR_FAIL, "daely refresh-token:",
+                      "missing — run `bridge bootstrap`")
+        overall = DOCTOR_EXIT_FAIL
+    else:
+        _doctor_print(DOCTOR_OK, "daely refresh-token:", "present in store")
+
+    if google_token is None:
+        _doctor_print(DOCTOR_FAIL, "google refresh-token:",
+                      "missing — run `bridge bootstrap`")
+        overall = DOCTOR_EXIT_FAIL
+    else:
+        _doctor_print(DOCTOR_OK, "google refresh-token:", "present in store")
+
+    # ── (4) mapping table summary ──
+    mappings = store.all_event_mappings()
+    failed_count = sum(1 for m in mappings if m.failed)
+    due_count = len(store.events_due_for_retry())
+    line = f"{len(mappings)} total"
+    if failed_count:
+        line += f", {failed_count} failed"
+    if due_count:
+        line += f", {due_count} due for retry"
+    if failed_count > 0:
+        _doctor_print(DOCTOR_WARN, "event mappings:", line)
+        if overall == DOCTOR_EXIT_OK:
+            overall = DOCTOR_EXIT_WARN
+    else:
+        _doctor_print(DOCTOR_OK, "event mappings:", line or "0 total")
+
+    # ── (5) last sync age ──
+    history = store.recent_sync_history(limit=10)
+    now = datetime.now(timezone.utc)
+    if not history:
+        _doctor_print(DOCTOR_WARN, "last sync:",
+                      "no sync recorded yet — bridge hasn't run a cycle")
+        if overall == DOCTOR_EXIT_OK:
+            overall = DOCTOR_EXIT_WARN
+    else:
+        last = history[0]
+        age_s = (now - last.completed_at).total_seconds()
+        age_min = int(age_s // 60)
+        threshold = cfg.poll_interval_minutes * 2
+        age_label = f"{age_min}m ago" if age_min < 1440 else f"{age_min // 60}h ago"
+        msg = (f"{age_label}, run {last.run_id} "
+               f"(+{last.inserts}/~{last.patches}/-{last.deletes}, "
+               f"{last.errors_count} errors)")
+        if age_min > threshold + 1:
+            msg += f"  [stale: > 2× poll_interval = {threshold}m]"
+            _doctor_print(DOCTOR_WARN, "last sync:", msg)
+            if overall == DOCTOR_EXIT_OK:
+                overall = DOCTOR_EXIT_WARN
+        else:
+            _doctor_print(DOCTOR_OK, "last sync:", msg)
+
+        # Recent error trend
+        with_errors = sum(1 for h in history if h.errors_count > 0)
+        if with_errors >= len(history) // 2 and with_errors > 1:
+            _doctor_print(DOCTOR_WARN, "sync error trend:",
+                          f"{with_errors}/{len(history)} recent runs had errors")
+            if overall == DOCTOR_EXIT_OK:
+                overall = DOCTOR_EXIT_WARN
+        elif with_errors > 0:
+            _doctor_print(DOCTOR_OK, "sync error trend:",
+                          f"{with_errors}/{len(history)} recent runs had errors "
+                          f"(within tolerance)")
+        else:
+            _doctor_print(DOCTOR_OK, "sync error trend:",
+                          f"no errors across last {len(history)} run(s)")
+
+    # ── (6) profile→calendar mapping config ──
+    profile_count = len(cfg.profile_calendar_mapping)
+    fb = cfg.fallback_google_calendar_id
+    if profile_count == 0 and not fb:
+        _doctor_print(DOCTOR_FAIL, "config mapping:",
+                      "no profile mapping and no fallback — sync would skip all")
+        overall = DOCTOR_EXIT_FAIL
+    else:
+        msg = f"{profile_count} profile entries"
+        msg += f", fallback set" if fb else ", no fallback"
+        _doctor_print(DOCTOR_OK, "config mapping:", msg)
+
+    # ── (7) optional live checks ──
+    if getattr(args, "live", False):
+        print("\nLive checks (talking to Daely + Google):")
+        live_overall = _doctor_live_checks(
+            cfg, store, daely_token, google_token,
+            daely_factory=daely_factory, google_factory=google_factory,
+        )
+        if live_overall == DOCTOR_EXIT_FAIL:
+            overall = DOCTOR_EXIT_FAIL
+        elif live_overall == DOCTOR_EXIT_WARN and overall == DOCTOR_EXIT_OK:
+            overall = DOCTOR_EXIT_WARN
+
+    # ── (8) summary ──
+    print()
+    if overall == DOCTOR_EXIT_OK:
+        print("Overall: OK")
+    elif overall == DOCTOR_EXIT_WARN:
+        print("Overall: WARN — review the [WARN] lines above")
+    else:
+        print("Overall: FAIL — fix the [FAIL] lines above")
+    if not getattr(args, "live", False):
+        print("\nUse `bridge doctor --live` to also try a Daely refresh + "
+              "Google list-calendars ping.")
+    store.close()
+    return overall
+
+
+def _doctor_live_checks(
+    cfg: BridgeConfig,
+    store: Store,
+    daely_token,  # noqa: ANN001
+    google_token,  # noqa: ANN001
+    *,
+    daely_factory: Callable[[BridgeConfig], DaelyClient] | None,
+    google_factory: Callable[[Store, BridgeConfig], GoogleClient] | None,
+) -> int:
+    """Talk to Daely + Google. Returns OK/WARN/FAIL exit code."""
+    out = DOCTOR_EXIT_OK
+
+    # Daely refresh
+    if daely_token is None:
+        _doctor_print(DOCTOR_WARN, "daely live refresh:",
+                      "skipped (no refresh-token in store)")
+        if out == DOCTOR_EXIT_OK:
+            out = DOCTOR_EXIT_WARN
+    else:
+        try:
+            if daely_factory is not None:
+                daely = daely_factory(cfg)
+            else:
+                daely = DaelyClient(min_pause_seconds=cfg.daely_min_pause_seconds)
+            daely.set_tokens(
+                access_token=daely_token.access_token,
+                refresh_token=daely_token.refresh_token,
+            )
+            resp = daely.refresh()
+            expires = resp.get("expires_in", "?")
+            _doctor_print(DOCTOR_OK, "daely live refresh:",
+                          f"token refreshed (expires_in={expires}s)")
+            # Persist rotated tokens
+            if daely.refresh_token:
+                store.put_token(
+                    provider=DAELY_TOKEN_PROVIDER,
+                    refresh_token=daely.refresh_token,
+                    access_token=daely.access_token,
+                )
+            try:
+                daely.close()
+            except Exception:
+                pass
+        except DaelyAuthError as e:
+            _doctor_print(DOCTOR_FAIL, "daely live refresh:", str(e))
+            out = DOCTOR_EXIT_FAIL
+        except Exception as e:
+            _doctor_print(DOCTOR_FAIL, "daely live refresh:", f"{type(e).__name__}: {e}")
+            out = DOCTOR_EXIT_FAIL
+
+    # Google list-calendars ping
+    if google_token is None:
+        _doctor_print(DOCTOR_WARN, "google live ping:",
+                      "skipped (no refresh-token in store)")
+        if out == DOCTOR_EXIT_OK:
+            out = DOCTOR_EXIT_WARN
+    else:
+        try:
+            if google_factory is not None:
+                google = google_factory(store, cfg)
+            else:
+                creds = GoogleClient.load_credentials(
+                    store, cfg.google_oauth_client_secrets_file,
+                    scopes=cfg.google_oauth_scopes,
+                )
+                if creds is None:
+                    raise RuntimeError("no Google credentials in store")
+                google = GoogleClient(credentials=creds)
+            cals = google.list_calendars()
+            _doctor_print(DOCTOR_OK, "google live ping:",
+                          f"{len(cals)} calendars accessible")
+        except Exception as e:
+            _doctor_print(DOCTOR_FAIL, "google live ping:",
+                          f"{type(e).__name__}: {e}")
+            out = DOCTOR_EXIT_FAIL
+
+    return out
+
+
 # ─────────────────── argparse ───────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -543,6 +800,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--once", action="store_true", help="single pass, then exit")
 
     sub.add_parser("status", help="show what the bridge knows about state")
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="run health checks against config + db (and optionally live "
+             "Daely/Google endpoints)",
+    )
+    p_doctor.add_argument(
+        "--live", action="store_true",
+        help="also try a Daely refresh + Google list-calendars (requires network)",
+    )
 
     p_resync = sub.add_parser(
         "resync",
@@ -576,6 +843,7 @@ COMMANDS = {
     "bootstrap": cmd_bootstrap,
     "run": cmd_run,
     "status": cmd_status,
+    "doctor": cmd_doctor,
     "resync": cmd_resync,
     "re-color": cmd_recolor,
 }
@@ -588,6 +856,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
-    "cmd_bootstrap", "cmd_recolor", "cmd_resync", "cmd_run", "cmd_status",
-    "main",
+    "cmd_bootstrap", "cmd_doctor", "cmd_recolor", "cmd_resync",
+    "cmd_run", "cmd_status", "main",
 ]
