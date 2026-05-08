@@ -323,6 +323,14 @@ class RealtimeClient:
                             self.stats.pings_received += 1
                             self.stats.last_ping_at = datetime.now(timezone.utc)
                             last_ping_monotonic = time.monotonic()
+                            # Log every 4th ping (≈ once per minute) so the
+                            # user can see in `docker logs` that the
+                            # connection is alive without log spam.
+                            if self.stats.pings_received % 4 == 1:
+                                log.info(
+                                    "realtime.ping",
+                                    pings_total=self.stats.pings_received,
+                                )
                             continue
 
                         if msg_type == _TYPE_COMPLETION:
@@ -334,7 +342,7 @@ class RealtimeClient:
                                     error=err,
                                 )
                             else:
-                                log.debug(
+                                log.info(
                                     "realtime.completion_ok",
                                     invocationId=obj.get("invocationId"),
                                 )
@@ -351,9 +359,11 @@ class RealtimeClient:
                             self._handle_invocation(obj)
                             continue
 
-                        log.debug(
+                        # Unknown type — log full payload so we can adapt
+                        # the parser if the server's protocol drifts.
+                        log.info(
                             "realtime.unknown_type",
-                            type=msg_type, msg=msg_text[:200],
+                            type=msg_type, msg=msg_text[:500],
                         )
 
                     # Liveness check — if no ping for 45s, the connection is dead
@@ -493,7 +503,13 @@ class RealtimeClient:
         target = obj.get("target")
         args = obj.get("arguments") or []
         if target != "ReceiveNotification":
-            log.debug("realtime.unknown_target", target=target)
+            # Log at INFO with full payload — if the server ever pushes a
+            # different invocation target, we want to see it loud and clear
+            # so we can adapt.
+            log.info(
+                "realtime.unknown_target",
+                target=target, args_preview=str(args)[:300],
+            )
             return
 
         if not args or not isinstance(args[0], dict):

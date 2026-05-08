@@ -12,6 +12,32 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.0.2] - 2026-05-08
+
+Patch — fixt Realtime-Filter (Server fired keine Notifications mit
+leerem `calendars`-Feld) + macht Connection-Liveness im Log sichtbar.
+
+### Behoben
+- **Empty-`calendars`-Filter-Bug**: bei v1.0.0/v1.0.1 sendete der
+  Bridge-Filter `calendars: []`. Empirisch (User-Test): selbst mit
+  `subscribeUserCalendars=true` und `subscribeGroupCalendars=true` fired
+  der Server **keine** ReceiveNotifications, wenn `calendars`-Liste leer
+  ist. Bridge ruft jetzt vor dem SetFilter `get_calendars(group.id)` auf
+  und passt die UUIDs der internen Calendars (`calendarType=0`) als
+  `calendars`-Liste in den Filter ein. Externe Calendars (Google-/Apple-/
+  MS-synced, `calendarType != 0`) werden nicht mit-subscribed — das ist
+  konsistent mit der Mapper-Filter-Regel.
+
+### Geändert
+- **Liveness-Logging im Realtime-Client**:
+  - Pings (alle 15s) loggen jetzt jeden 4. Ping als `realtime.ping`
+    (≈ minütlich) — Operator sieht `docker compose logs` weiß-und-grün
+    dass die Verbindung lebt.
+  - SetFilter-Completion ist jetzt `info`-Level (war `debug`), damit der
+    Erfolg des Subscribe sofort sichtbar ist.
+  - Unbekannte Invocation-Targets loggen jetzt `info` mit Payload-Preview,
+    damit Server-seitige Protokoll-Drift nicht silent passiert.
+
 ## [1.0.1] - 2026-05-08
 
 Patch — fixt Delete-Propagation bei Realtime-Triggern.
@@ -207,7 +233,8 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.2
 [1.0.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.1
 [1.0.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.0
 [0.1.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.1

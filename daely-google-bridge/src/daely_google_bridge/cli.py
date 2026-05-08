@@ -493,12 +493,28 @@ def _start_realtime_client(
     # We need user_id + group_id for the SetFilter payload. Pull them once
     # at startup; a stale id would just mean SetFilter targets the wrong
     # subject space and we'd see no events — easy to spot.
+    #
+    # We ALSO pre-fetch the user's internal calendar UUIDs and pass them in
+    # the filter's `calendars` field. Empirically (v1.0.0/v1.0.1), an empty
+    # `calendars` list seems to silently disable subscription on the server
+    # side even with `subscribeUserCalendars=true` — passing the actual
+    # UUIDs is what the official Dart app does too.
     try:
         me = daely.get_me()
         groups = daely.get_my_groups()
         if not groups:
             raise RuntimeError("no Daely groups; can't subscribe")
         group = groups[0]
+        all_cals = daely.get_calendars(group.id)
+        # Only internal calendars (calendarType=0); the bridge doesn't
+        # care about externally-synced ones.
+        calendar_uuids = [c.id for c in all_cals if c.calendarType == 0]
+        log.info(
+            "run.realtime_resolved_subscription",
+            user_id=me.id[:8] + "…",
+            group_id=group.id[:8] + "…",
+            internal_calendar_count=len(calendar_uuids),
+        )
     except Exception as e:
         log.warning("run.realtime_disabled_fetch_failed", err=repr(e))
         print(f"WARNING: realtime disabled — could not fetch user/group: {e}",
@@ -544,6 +560,7 @@ def _start_realtime_client(
             subscribe_group_calendars=cfg.realtime.subscribe_group_calendars,
             subscribe_chores=cfg.realtime.subscribe_chores,
             subscribe_checklists=cfg.realtime.subscribe_checklists,
+            calendars=calendar_uuids,
         )
 
     client.start()
