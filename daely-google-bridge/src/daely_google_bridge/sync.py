@@ -39,7 +39,7 @@ from .mapper import (
     select_target_calendar_id,
     should_skip_calendar,
 )
-from .models import Calendar, CalendarEvent, CalendarWithEvents
+from .models import Calendar, CalendarEvent, CalendarWithEvents, Profile
 from .store import EventMapping, Store
 
 log = structlog.get_logger(__name__)
@@ -128,7 +128,9 @@ def _process_event(
     google: GoogleClient,
     store: Store,
     profile_calendar_map: dict[str, str],
-    profiles_map: dict[str, str] | None,
+    profiles_map: dict[str, Profile] | None,
+    apply_colors: bool,
+    color_overrides: dict[str, str] | None,
     report: SyncReport,
 ) -> None:
     """Handle one (already-deduped) Daely event."""
@@ -144,7 +146,10 @@ def _process_event(
         return
 
     body = daely_event_to_google(
-        event, daely_calendar, profile_calendar_map, profiles_map=profiles_map,
+        event, daely_calendar, profile_calendar_map,
+        profiles_map=profiles_map,
+        apply_colors=apply_colors,
+        color_overrides=color_overrides,
     )
     if body is None:
         # mapper said skip — should be unreachable here (caller pre-filters by
@@ -217,7 +222,9 @@ def _process_calendar(
     google: GoogleClient,
     store: Store,
     profile_calendar_map: dict[str, str],
-    profiles_map: dict[str, str] | None,
+    profiles_map: dict[str, Profile] | None,
+    apply_colors: bool,
+    color_overrides: dict[str, str] | None,
     fallback_google_calendar_id: str | None,
     detect_missing_as_deleted: bool,
     report: SyncReport,
@@ -252,6 +259,8 @@ def _process_calendar(
             store=store,
             profile_calendar_map=profile_calendar_map,
             profiles_map=profiles_map,
+            apply_colors=apply_colors,
+            color_overrides=color_overrides,
             report=report,
         )
 
@@ -292,12 +301,13 @@ def _run_sync(
         return _finalize(report, t0)
     group = groups[0]
 
-    # Phase 3e: load profile-name lookup once per cycle. A failure here
-    # demotes the description-footer to a no-op but doesn't abort the sync.
-    profiles_map: dict[str, str] = {}
+    # Phase 3e/3f: load profiles once per cycle. Footer (3e) needs the names;
+    # color-mapping (3f) additionally needs colorCode + sortOrder. A failure
+    # here demotes BOTH features to no-ops but doesn't abort the sync.
+    profiles_map: dict[str, Profile] = {}
     try:
         profiles = daely.get_profiles(group.id)
-        profiles_map = {p.id: p.name for p in profiles if p.name}
+        profiles_map = {p.id: p for p in profiles if p.name}
         log.info(
             "sync.profiles_loaded", run_id=report.run_id, count=len(profiles_map),
         )
@@ -305,6 +315,11 @@ def _run_sync(
         log.warning(
             "sync.profile_fetch_failed", run_id=report.run_id, error=repr(e),
         )
+
+    apply_colors = config.color_mapping.enabled
+    color_overrides = (
+        config.color_mapping.profile_overrides if apply_colors else None
+    )
 
     cwes = daely.get_calendars_with_events(
         group.id, start_date=start_date, end_date=end_date,
@@ -316,6 +331,8 @@ def _run_sync(
             store=store,
             profile_calendar_map=config.profile_calendar_mapping,
             profiles_map=profiles_map,
+            apply_colors=apply_colors,
+            color_overrides=color_overrides,
             fallback_google_calendar_id=config.fallback_google_calendar_id,
             detect_missing_as_deleted=detect_missing_as_deleted,
             report=report,

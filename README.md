@@ -230,6 +230,11 @@ löst das beim Callback wieder auf den richtigen Listener auf.
 ✅ Profil-UUIDs in `additionalParticipants` werden in Klartext-Namen
    aufgelöst und als **„👥 Beteiligt: …"-Footer** an die Description
    gehängt — damit du im Widget direkt siehst, wer der Termin betrifft.\
+✅ **Profil-Farben** werden auf eine der 11 Google-Event-Farben gemappt
+   (Auto-Match per nächstem Hex, pro Profil in der Config überschreibbar).
+   Bei mehreren Beteiligten kommt zusätzlich ein farbiger Punkt-Prefix
+   im Titel — z. B. `🔴🔵 Familienessen` —, damit du im Widget auf einen Blick
+   siehst, wer alles dabei ist.\
 ✅ Externe Daely-Kalender (Google/Apple/Microsoft, die schon via Daelys
    eigene Integration laufen) werden **übersprungen**, damit keine
    Sync-Loops entstehen.\
@@ -266,6 +271,23 @@ Falls sich die `docker-compose.yml` mal ändern sollte (selten), einmal:
 curl -O https://raw.githubusercontent.com/twobeass/daely-google-bridge/main/docker-compose.yml
 docker compose up -d
 ```
+
+### Bestehende Events neu einfärben/relabeln
+
+Wenn ein Update das **Format** der gespiegelten Events ändert (z. B. neue
+Profil-Farben, anderer Footer), bekommt die Bridge das von alleine **nicht**
+mit — sie patcht ein Event nur, wenn Daely es geändert hat. Damit deine
+Bestandsevents sofort die neue Optik bekommen:
+
+```bash
+# Bridge stoppen, einmalig den Patch-Trigger reseten, neu starten
+docker compose stop bridge
+sqlite3 ./data/bridge.db "UPDATE event_mapping SET last_seen_updated = NULL;"
+docker compose start bridge
+```
+
+Beim nächsten Sync sieht die Bridge alle Events als „verändert" und
+re-patched sie mit der neuen Logik — am Inhalt selbst ändert sich nichts.
 
 ## Selbst aus dem Source bauen (nur für Contributors)
 

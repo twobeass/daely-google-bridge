@@ -25,6 +25,7 @@ from daely_google_bridge.models import (
     Calendar,
     CalendarEvent,
     CalendarWithEvents,
+    Profile,
     is_all_day,
     is_recurring_master_or_unique,
     master_uuid,
@@ -525,3 +526,248 @@ def test_footer_omitted_when_event_has_no_additional_participants():
                                   profiles_map=profiles)
     assert body is not None
     assert body["description"] == "alone"
+
+
+# ─────────────── Phase 3f — colorId + emoji-prefix (Hybrid C) ───────────────
+
+# Distinct hex codes that land in distinct Google colorIds:
+#   #d50000 → 11 (Tomato, 🔴)
+#   #039be5 →  7 (Peacock, 🔵)
+#   #f6bf26 →  5 (Banana, 🟡)
+#   #0b8043 → 10 (Basil, 🟢)
+
+
+def _profiles_full(*pairs: tuple[str, str, str | None, int | None]) -> dict[str, Profile]:
+    """Helper: build a {uuid: Profile} dict from tuples (uuid, name, hex, sortOrder)."""
+    return {
+        uuid: Profile(id=uuid, name=name, colorCode=hex_, sortOrder=so)
+        for uuid, name, hex_, so in pairs
+    }
+
+
+def test_colors_disabled_by_default_no_colorId_no_prefix():
+    """apply_colors=False (the default) leaves summary + body untouched."""
+    profiles = _profiles_full(("p-anna", "Anna", "#d50000", 0))
+    ev = _ev_with_participants(["p-anna"], description="x")
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(), profiles_map=profiles,
+    )
+    assert body is not None
+    assert "colorId" not in body
+    assert body["summary"] == ev.title  # no emoji prefix
+
+
+def test_single_participant_sets_colorId_no_emoji_prefix():
+    profiles = _profiles_full(("p-anna", "Anna", "#d50000", 0))
+    ev = _ev_with_participants(["p-anna"], description="x")
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert body["colorId"] == "11"  # Tomato (red)
+    assert body["summary"] == ev.title  # 1 participant → no prefix
+
+
+def test_two_participants_sets_emoji_prefix_in_alphabetical_order():
+    profiles = _profiles_full(
+        ("p-bob", "Bob", "#039be5", 1),    # Peacock blue → 🔵
+        ("p-anna", "Anna", "#d50000", 0),  # Tomato red → 🔴
+    )
+    # Listed bob-first to confirm prefix ordering follows alpha-sorted names,
+    # not participants-list order.
+    ev = _ev_with_participants(["p-bob", "p-anna"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    # Anna (red) comes before Bob (blue) alphabetically.
+    assert body["summary"] == "🔴🔵 " + ev.title
+    # Main profile = sortOrder=0 (Anna) → red colorId.
+    assert body["colorId"] == "11"
+    # Footer order matches prefix order.
+    assert body["description"] == "👥 Beteiligt: Anna, Bob"
+
+
+def test_three_participants_emoji_count_matches():
+    profiles = _profiles_full(
+        ("p-anna", "Anna", "#d50000", 0),  # 🔴
+        ("p-bob", "Bob", "#039be5", 1),    # 🔵
+        ("p-carla", "Carla", "#f6bf26", 2),  # 🟡
+    )
+    ev = _ev_with_participants(["p-anna", "p-bob", "p-carla"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert body["summary"] == "🔴🔵🟡 " + ev.title
+
+
+def test_override_beats_auto_for_main_profile_color():
+    profiles = _profiles_full(("p-anna", "Anna", "#d50000", 0))  # auto = 11
+    ev = _ev_with_participants(["p-anna"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+        color_overrides={"p-anna": "5"},  # override → Banana
+    )
+    assert body is not None
+    assert body["colorId"] == "5"
+
+
+def test_override_changes_emoji_prefix_too():
+    profiles = _profiles_full(
+        ("p-anna", "Anna", "#d50000", 0),  # auto → 11 (🔴)
+        ("p-bob", "Bob", "#039be5", 1),    # auto → 7 (🔵)
+    )
+    ev = _ev_with_participants(["p-anna", "p-bob"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+        color_overrides={"p-anna": "5"},  # Anna → Banana 🟡
+    )
+    assert body is not None
+    assert body["summary"] == "🟡🔵 " + ev.title
+    assert body["colorId"] == "5"  # Anna (sortOrder=0) is main, override wins
+
+
+def test_main_profile_picked_by_lowest_sortOrder():
+    """sortOrder=0 (account owner) wins regardless of participant-list position."""
+    profiles = _profiles_full(
+        ("p-bob", "Bob", "#039be5", 5),     # higher sortOrder
+        ("p-anna", "Anna", "#d50000", 0),   # account owner
+    )
+    # bob listed first
+    ev = _ev_with_participants(["p-bob", "p-anna"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert body["colorId"] == "11"  # Anna's red, not Bob's blue
+
+
+def test_main_profile_tie_broken_by_participant_order():
+    """Equal sortOrder → first in additionalParticipants wins."""
+    profiles = _profiles_full(
+        ("p-bob", "Bob", "#039be5", 0),
+        ("p-anna", "Anna", "#d50000", 0),
+    )
+    ev_bob_first = _ev_with_participants(["p-bob", "p-anna"], description=None)
+    ev_anna_first = _ev_with_participants(["p-anna", "p-bob"], description=None)
+    body_bob = daely_event_to_google(
+        ev_bob_first, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    body_anna = daely_event_to_google(
+        ev_anna_first, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body_bob["colorId"] == "7"   # Bob (blue) first
+    assert body_anna["colorId"] == "11"  # Anna (red) first
+
+
+def test_no_colorId_when_main_profile_has_no_colorCode_and_no_override():
+    profiles = _profiles_full(("p-anna", "Anna", None, 0))
+    ev = _ev_with_participants(["p-anna"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert "colorId" not in body
+
+
+def test_override_works_even_without_colorCode():
+    profiles = _profiles_full(("p-anna", "Anna", None, 0))
+    ev = _ev_with_participants(["p-anna"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+        color_overrides={"p-anna": "3"},
+    )
+    assert body is not None
+    assert body["colorId"] == "3"
+
+
+def test_unknown_participant_uuids_dont_crash_color_path():
+    profiles = _profiles_full(("p-anna", "Anna", "#d50000", 0))
+    ev = _ev_with_participants(["p-unknown", "p-anna"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert body["colorId"] == "11"  # only Anna is known
+    assert body["summary"] == ev.title  # only 1 known participant → no prefix
+
+
+def test_emoji_prefix_only_when_two_or_more_resolvable():
+    """One known + several unknown → no prefix (since prefix needs ≥2 emojis)."""
+    profiles = _profiles_full(("p-anna", "Anna", "#d50000", 0))
+    ev = _ev_with_participants(["p-anna", "p-x", "p-y", "p-z"], description=None)
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert body["summary"] == ev.title  # no prefix
+
+
+def test_legacy_string_profiles_map_still_supported_no_color_data():
+    """Backward compat: passing {uuid: name} works for footer but yields no color."""
+    profiles = {"p-anna": "Anna", "p-bob": "Bob"}
+    ev = _ev_with_participants(["p-anna", "p-bob"], description="x")
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    # Footer still works
+    assert body["description"] == "x\n\n👥 Beteiligt: Anna, Bob"
+    # No colorCode info → no colorId, no emoji prefix
+    assert "colorId" not in body
+    assert body["summary"] == ev.title
+
+
+def test_apply_colors_false_with_full_profiles_still_no_color():
+    profiles = _profiles_full(
+        ("p-anna", "Anna", "#d50000", 0),
+        ("p-bob", "Bob", "#039be5", 1),
+    )
+    ev = _ev_with_participants(["p-anna", "p-bob"], description="x")
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles,  # apply_colors omitted → False
+    )
+    assert body is not None
+    assert "colorId" not in body
+    assert body["summary"] == ev.title
+    # Footer remains unaffected by the toggle
+    assert body["description"] == "x\n\n👥 Beteiligt: Anna, Bob"
+
+
+def test_event_customColorCode_does_NOT_affect_google_colorId():
+    """Per-event colorCode in Daely stays in extProp; profile-color drives Google."""
+    profiles = _profiles_full(("p-anna", "Anna", "#d50000", 0))  # → 11 Tomato
+    ev = CalendarEvent.model_validate({
+        "id": "evt-cc", "recurringId": None, "deleted": False,
+        "title": "x", "description": None, "location": None,
+        "start": {"dateTime": "2026-05-08T15:00:00+02:00", "timeZone": "Europe/Berlin", "date": None},
+        "end":   {"dateTime": "2026-05-08T16:00:00+02:00", "timeZone": "Europe/Berlin", "date": None},
+        "created": "2026-04-27T18:37:31+00:00", "updated": "2026-04-27T18:37:31+00:00",
+        "recurrence": [], "reminders": [],
+        "customColorCode": "#0b8043",  # would map to Basil (10) if we honoured it
+        "additionalParticipants": ["p-anna"],
+        "editable": True, "hasError": False, "privateEvent": False,
+    })
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        profiles_map=profiles, apply_colors=True,
+    )
+    assert body is not None
+    assert body["colorId"] == "11"  # profile, not event-customColorCode
+    # extProp still mirrors the raw event override for diagnostics.
+    assert body["extendedProperties"]["private"]["daely_custom_color"] == "#0b8043"

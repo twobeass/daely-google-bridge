@@ -288,6 +288,61 @@ bridge resync <cal_id>   # Force full re-sync für einen Calendar (bei Schema-Ä
 - **Daely-Passwort** wird NIE persistiert. Nur 1× im Bootstrap zur RT-Erzeugung benutzt.
 - **Logging** darf keine Tokens loggen. structlog-Filter setzt `*token*`-Felder auf `<REDACTED>`.
 
+## Phase 3f – Profil-Farben → Google Event-Color (Hybrid)
+
+Erweiterung des Mappers in `colors.py` + `mapper.py`. Ziel: pro Event eine
+sichtbare Profil-Zuordnung, **ohne** dass die Bridge mehrere Sub-Kalender pro
+Profil verwaltet (siehe oben — single-calendar by design).
+
+### Strategie (Hybrid C)
+
+1. **`colorId`** des Google-Events wird auf den **Hauptteilnehmer** gesetzt
+   (lowest `Profile.sortOrder`; tie-break über die Reihenfolge in
+   `additionalParticipants`).
+2. **Bei ≥2 Beteiligten** wird ein **Emoji-Punkt-Prefix** an den Titel
+   gehängt (`🔴🔵 Familienessen`), Reihenfolge alphabetisch nach Name —
+   identisch zur Footer-Sortierung, damit Title und Footer konsistent sind.
+
+### Profil-Farbe → Google-colorId
+
+Google-Events haben kein freies Farb-Feld, sondern nur eine Enum
+(`colorId` 1–11). Der Mapper macht ein **nearest-RGB-Match** vom Daely-
+`Profile.colorCode` (`#RRGGBB`) auf eine der 11 Google-Farben.
+
+Override-Pfad: in `config.yaml` unter `color_mapping.profile_overrides`
+können einzelne Profil-UUIDs hartkodiert auf eine `colorId` (`"1"`–`"11"`)
+gepinnt werden — nützlich, wenn zwei Profil-Farben in dieselbe Google-
+Farbe auto-matchen oder der User schlicht eine andere Zuordnung möchte.
+
+### Was bewusst NICHT passiert
+
+- **`event.customColorCode` wird ignoriert.** Eine Per-Event-Farbe in
+  der Daely-App überschreibt also **nicht** die Profil-Optik. Begründung:
+  konsistente Profil-Codierung ist die ganze UX-Idee, sonst „flackert"
+  die Optik bei einzelnen Events. Der Hex bleibt zur Diagnose in
+  `extendedProperties.private.daely_custom_color`.
+- **Multiple `colorId`s pro Event** gibt's bei Google nicht. Bei mehreren
+  Beteiligten landet die Event-Farbe bei einer Person; die anderen werden
+  über die Emoji-Sequenz im Titel sichtbar gemacht.
+- **Re-coloring von Bestand:** der bestehende Patch-Trigger
+  (`event.updated != mapping.last_seen_updated`) gilt unverändert. Wenn
+  sich nur das Mapping (z. B. neuer Override) ändert, ohne dass Daely
+  das Event ändert, patcht die Bridge nicht. Workaround dann:
+  `UPDATE event_mapping SET last_seen_updated = NULL;` — gleicher Trick
+  wie beim Profil-Footer-Rollout.
+
+### Emoji-Kollisionen
+
+Die 11 Google-Farben werden auf die Standard-Punkt-Emojis abgebildet
+(🔴🟠🟡🟢🔵🟣⚫). Drei Buckets kollidieren:
+
+- Lavender (1) + Grape (3) → 🟣
+- Sage (2) + Basil (10) → 🟢
+- Peacock (7) + Blueberry (9) → 🔵
+
+In typischen Familien (4–5 Profile) ist das kein Problem; bei einem
+Konflikt fixt der `profile_overrides`-Pfad eine konkrete Zuordnung.
+
 ## Was diese Architektur NICHT kann (Mission-Status absichtlich)
 
 - ❌ Google-Events nach Daely zurückschreiben (das löst der User über Daelys eingebauten URL-Calendar-Feature)

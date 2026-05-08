@@ -35,6 +35,28 @@ profile_calendar_mapping: {}
 fallback_google_calendar_id: null
 
 
+# ─── Profile colors → Google event colorId ──────────────────────
+# When `enabled`, each Google event gets a `colorId` (one of Google's 11
+# event colors) derived from the participant's profile color. With multiple
+# participants the title is prefixed by colored emoji-dots, one per profile,
+# in the same alphabetical order as the description footer.
+#
+# Auto-match picks the nearest of Google's 11 colors for each profile's
+# `colorCode`. If two profiles auto-match into the same color and you want
+# them visually distinct — or you simply prefer a different mapping — pin a
+# colorId per profile in `profile_overrides`. Valid colorIds: "1"–"11".
+#
+# Reference (id → Google's friendly name):
+#   1 Lavender   2 Sage    3 Grape    4 Flamingo  5 Banana    6 Tangerine
+#   7 Peacock    8 Graphite  9 Blueberry  10 Basil   11 Tomato
+color_mapping:
+  enabled: true
+  profile_overrides: {}
+  # profile_overrides:
+  #   00000000-0000-0000-0004-000000000001: "11"   # Anna → Tomato
+  #   00000000-0000-0000-0004-000000000002: "7"    # Bob  → Peacock
+
+
 # ─── Sync schedule ───────────────────────────────────────────────
 poll_interval_minutes: 15
 lookback_days: 30

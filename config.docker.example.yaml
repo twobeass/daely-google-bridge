@@ -32,6 +32,20 @@ profile_calendar_mapping: {}
 fallback_google_calendar_id: null
 
 
+# ─── Profile colors → Google event colorId ──────────────────────
+# Pick a Google event-color per participant. Auto-match by default; pin a
+# colorId per profile in `profile_overrides` when you want full control.
+# Valid colorIds: "1"–"11" (1 Lavender, 2 Sage, 3 Grape, 4 Flamingo,
+# 5 Banana, 6 Tangerine, 7 Peacock, 8 Graphite, 9 Blueberry, 10 Basil,
+# 11 Tomato). Multi-participant events get a 🔴🔵-style title prefix.
+color_mapping:
+  enabled: true
+  profile_overrides: {}
+  # profile_overrides:
+  #   00000000-0000-0000-0004-000000000001: "11"
+  #   00000000-0000-0000-0004-000000000002: "7"
+
+
 # ─── Sync schedule ───────────────────────────────────────────────
 poll_interval_minutes: 15
 lookback_days: 30

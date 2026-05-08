@@ -11,8 +11,8 @@ Mapping decisions (see findings/05_EVENT_MODEL.md, 06_BRIDGE_ARCHITECTURE.md,
 - Daely-only fields (id, recurringId, calendarId, profileId, additionalParticipants,
   customColorCode, privateEvent, hasError) are mirrored into
   `extendedProperties.private` for diagnostics. The bridge never reads them back.
-- `customColorCode` (#RRGGBB) is NOT mapped to Google `colorId` (1–11 enum) in
-  the MVP — colour conversion would be lossy. We just preserve the hex in extProp.
+- `customColorCode` is NOT mapped to Google `colorId` — by design. Per-event
+  user overrides in Daely don't propagate; we preserve the hex in extProp only.
 - `privateEvent: true` → Google `visibility: "private"`; otherwise omitted.
 - `description=None` AND empty string → field not set in Google body (cleaner UI).
 - Server-managed Daely fields (editable, hasError, deleted, created, updated) are
@@ -22,15 +22,23 @@ Mapping decisions (see findings/05_EVENT_MODEL.md, 06_BRIDGE_ARCHITECTURE.md,
   in `additionalParticipants` are resolved to display names and appended to
   the event's description as a footer (`👥 Beteiligt: …`). Unknown UUIDs are
   silently dropped. Names are sorted case-insensitively for deterministic output.
+- Profile-color (Phase 3f): when `apply_colors=True` and full Profile objects
+  are passed in `profiles_map`, the event gets a Google `colorId` derived from
+  the main participant's `colorCode` (nearest-RGB match, overridable via
+  `color_overrides`). With ≥2 participants, a sequence of color-emoji is
+  prepended to the title (one per participant, in the same alphabetical order
+  the footer uses).
 """
 from __future__ import annotations
 
 import json
 from typing import Any
 
+from .colors import emoji_for_color_id, nearest_color_id
 from .models import (
     Calendar,
     CalendarEvent,
+    Profile,
     is_all_day,
     master_uuid,
 )
@@ -142,9 +150,29 @@ PROFILE_FOOTER_SEPARATOR = "\n\n"
 PROFILE_FOOTER_PREFIX = "👥 Beteiligt: "
 
 
+def _normalize_profiles_map(
+    profiles_map: dict[str, str] | dict[str, Profile] | None,
+) -> dict[str, Profile]:
+    """Accept either {uuid: name} (legacy) or {uuid: Profile} (full).
+
+    Returns a uniform {uuid: Profile} dict so downstream helpers can reach
+    `colorCode`/`sortOrder` when present and degrade gracefully when not.
+    """
+    if not profiles_map:
+        return {}
+    out: dict[str, Profile] = {}
+    for uuid, val in profiles_map.items():
+        if isinstance(val, Profile):
+            out[uuid] = val
+        elif isinstance(val, str):
+            out[uuid] = Profile(id=uuid, name=val)
+        # silently ignore unexpected value types — defensive for legacy callers
+    return out
+
+
 def _build_profile_footer(
     additional_participants: list[str],
-    profiles_map: dict[str, str] | None,
+    profiles_norm: dict[str, Profile],
 ) -> str | None:
     """Resolve UUIDs to names; return formatted footer or None.
 
@@ -152,24 +180,96 @@ def _build_profile_footer(
     case-insensitively for deterministic output. Returns None if no name could
     be resolved.
     """
-    if not profiles_map or not additional_participants:
+    if not profiles_norm or not additional_participants:
         return None
     names: list[str] = []
     for uuid in additional_participants:
-        name = profiles_map.get(uuid)
-        if name:  # also drops empty strings
-            names.append(name)
+        prof = profiles_norm.get(uuid)
+        if prof and prof.name:
+            names.append(prof.name)
     if not names:
         return None
     names.sort(key=str.casefold)
     return PROFILE_FOOTER_PREFIX + ", ".join(names)
 
 
+def _pick_main_profile(
+    additional_participants: list[str],
+    profiles_norm: dict[str, Profile],
+) -> Profile | None:
+    """Pick the dominant participant for single-color decisions.
+
+    Strategy: lowest sortOrder wins (account-owner is sortOrder=0 in Daely);
+    ties resolve by participant-list order. Profiles unknown to `profiles_norm`
+    are ignored entirely.
+    """
+    candidates: list[tuple[int, int, Profile]] = []
+    for idx, uuid in enumerate(additional_participants):
+        prof = profiles_norm.get(uuid)
+        if prof is None:
+            continue
+        sort_order = prof.sortOrder if prof.sortOrder is not None else 1_000_000
+        candidates.append((sort_order, idx, prof))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: (t[0], t[1]))
+    return candidates[0][2]
+
+
+def _resolve_color_id(
+    profile: Profile | None,
+    color_overrides: dict[str, str] | None,
+) -> str | None:
+    """Override beats auto. Returns None if neither a valid override nor a
+    parseable colorCode is available."""
+    if profile is None:
+        return None
+    if color_overrides:
+        override = color_overrides.get(profile.id)
+        if override is not None:
+            return override
+    return nearest_color_id(profile.colorCode)
+
+
+def _build_emoji_prefix(
+    additional_participants: list[str],
+    profiles_norm: dict[str, Profile],
+    color_overrides: dict[str, str] | None,
+) -> str | None:
+    """Multi-participant title-prefix. Order mirrors the footer
+    (alphabetical, case-insensitive). Returns None unless ≥2 participants
+    can be resolved to a colorId.
+    """
+    known: list[Profile] = []
+    seen: set[str] = set()
+    for uuid in additional_participants:
+        prof = profiles_norm.get(uuid)
+        if prof is None or not prof.name or prof.id in seen:
+            continue
+        known.append(prof)
+        seen.add(prof.id)
+    if len(known) < 2:
+        return None
+    known.sort(key=lambda p: p.name.casefold())
+    emojis: list[str] = []
+    for p in known:
+        cid = _resolve_color_id(p, color_overrides)
+        em = emoji_for_color_id(cid)
+        if em:
+            emojis.append(em)
+    if len(emojis) < 2:
+        return None
+    return "".join(emojis) + " "
+
+
 def daely_event_to_google(
     event: CalendarEvent,
     calendar: Calendar,
     profile_calendar_map: dict[str, str],  # noqa: ARG001  unused but part of API for future
-    profiles_map: dict[str, str] | None = None,
+    profiles_map: dict[str, str] | dict[str, Profile] | None = None,
+    *,
+    apply_colors: bool = False,
+    color_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Convert a Daely event to a Google Calendar event body dict.
 
@@ -193,8 +293,18 @@ def daely_event_to_google(
     if should_skip_calendar(calendar):
         return None
 
+    profiles_norm = _normalize_profiles_map(profiles_map)
+
+    summary = event.title
+    if apply_colors:
+        prefix = _build_emoji_prefix(
+            event.additionalParticipants, profiles_norm, color_overrides,
+        )
+        if prefix:
+            summary = prefix + event.title
+
     body: dict[str, Any] = {
-        "summary": event.title,
+        "summary": summary,
         "start": _start_end_to_google(event.start),
         "end": _start_end_to_google(event.end),
         "iCalUID": f"{master_uuid(event)}@daely-google-bridge",
@@ -203,7 +313,14 @@ def daely_event_to_google(
         },
         "reminders": _reminders_to_google(event.reminders),
     }
-    footer = _build_profile_footer(event.additionalParticipants, profiles_map)
+
+    if apply_colors:
+        main_profile = _pick_main_profile(event.additionalParticipants, profiles_norm)
+        color_id = _resolve_color_id(main_profile, color_overrides)
+        if color_id is not None:
+            body["colorId"] = color_id
+
+    footer = _build_profile_footer(event.additionalParticipants, profiles_norm)
     if footer is not None:
         if event.description:
             body["description"] = event.description + PROFILE_FOOTER_SEPARATOR + footer

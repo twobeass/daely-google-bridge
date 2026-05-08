@@ -6,7 +6,36 @@ populates `profile_calendar_mapping` after creating Google sub-calendars.
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .colors import VALID_COLOR_IDS
+
+
+class ColorMappingConfig(BaseModel):
+    """Per-profile event-color settings.
+
+    Auto-match: the bridge picks the nearest of Google's 11 event colorIds for
+    each profile based on `Profile.colorCode` (#RRGGBB). Set `profile_overrides`
+    to pin a profile to a specific Google colorId — useful when two profiles
+    auto-match into the same color and you want them visually distinct, or when
+    you simply prefer a different palette assignment than the auto-pick.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = True
+    profile_overrides: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("profile_overrides")
+    @classmethod
+    def _validate_color_ids(cls, v: dict[str, str]) -> dict[str, str]:
+        bad = {p: c for p, c in v.items() if c not in VALID_COLOR_IDS}
+        if bad:
+            raise ValueError(
+                f"profile_overrides has invalid Google colorId(s): {bad}. "
+                f"Must be one of {sorted(VALID_COLOR_IDS, key=int)}."
+            )
+        return v
 
 
 class BridgeConfig(BaseModel):
@@ -44,6 +73,9 @@ class BridgeConfig(BaseModel):
     # key = Daely profile UUID; value = Google calendarId
     profile_calendar_mapping: dict[str, str] = Field(default_factory=dict)
     fallback_google_calendar_id: str | None = None
+
+    # Profile-color → Google colorId mapping (auto-match + per-profile overrides).
+    color_mapping: ColorMappingConfig = Field(default_factory=ColorMappingConfig)
 
     # Sync
     poll_interval_minutes: int = 15
@@ -98,4 +130,4 @@ def save_config(cfg: BridgeConfig, path: Path | str, *, backup: bool = True) -> 
     p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
-__all__ = ["BridgeConfig", "load_config", "save_config"]
+__all__ = ["BridgeConfig", "ColorMappingConfig", "load_config", "save_config"]
