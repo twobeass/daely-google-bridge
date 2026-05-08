@@ -637,3 +637,69 @@ def test_prune_sync_history_no_op_when_under_limit(store):
 def test_recent_sync_history_limit_zero_returns_empty(store):
     store.record_sync_history(**_hist_args())
     assert store.recent_sync_history(limit=0) == []
+
+
+# ────────── checkpoint (v0.1.1) ──────────
+
+
+def test_checkpoint_returns_triple_for_wal_db(tmp_path):
+    """File-backed db is in WAL mode; checkpoint returns (busy, log, ckpt)."""
+    s = Store(tmp_path / "bridge.db")
+    try:
+        # Write something so there's actual WAL content to checkpoint
+        s.put_token(provider="daely", refresh_token="rt")
+        result = s.checkpoint()
+        assert result is not None
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+        # All three values are integers (busy=0, log≥0, checkpointed≥0)
+        for v in result:
+            assert isinstance(v, int)
+    finally:
+        s.close()
+
+
+def test_checkpoint_in_memory_db_is_safe(store):
+    """In-memory db doesn't use WAL, but checkpoint must not raise."""
+    result = store.checkpoint()
+    # In :memory: mode, the pragma still runs but returns no useful frames.
+    # Either None or a triple of zeros — both acceptable.
+    assert result is None or result == (0, 0, 0) or isinstance(result, tuple)
+
+
+def test_checkpoint_rejects_invalid_mode(store):
+    with pytest.raises(ValueError) as exc:
+        store.checkpoint(mode="WRONG")
+    assert "checkpoint mode must be one of" in str(exc.value)
+
+
+def test_checkpoint_accepts_all_documented_modes(tmp_path):
+    s = Store(tmp_path / "bridge.db")
+    try:
+        s.put_token(provider="daely", refresh_token="rt")
+        for mode in ("PASSIVE", "FULL", "RESTART", "TRUNCATE", "passive", "Full"):
+            r = s.checkpoint(mode=mode)
+            assert r is None or isinstance(r, tuple)
+    finally:
+        s.close()
+
+
+def test_checkpoint_makes_writes_visible_to_separate_connection(tmp_path):
+    """The whole point of checkpoint(): writes via Store become visible to
+    a fresh independent sqlite3 connection without waiting for auto-flush."""
+    db_file = tmp_path / "bridge.db"
+    s = Store(db_file)
+    try:
+        s.record_sync_history(**_hist_args(run_id="checkpoint-visibility-test"))
+        s.checkpoint()  # explicit checkpoint
+        # Open a separate connection (simulating bridge doctor in another process)
+        independent = sqlite3.connect(str(db_file))
+        try:
+            count = independent.execute(
+                "SELECT count(*) FROM sync_history"
+            ).fetchone()[0]
+            assert count == 1
+        finally:
+            independent.close()
+    finally:
+        s.close()

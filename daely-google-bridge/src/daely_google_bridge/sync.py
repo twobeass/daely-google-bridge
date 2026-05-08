@@ -414,6 +414,10 @@ def _finalize(report: SyncReport, t0: float, *, store: Store | None = None) -> S
                 errors=report.errors,
             )
             store.prune_sync_history(keep_last=500)
+            # Explicit checkpoint so concurrent reader connections (e.g. a
+            # separate `bridge doctor` process) see the new history row
+            # immediately, without waiting for SQLite's auto-checkpoint.
+            store.checkpoint()
         except Exception:
             log.exception("sync.history_record_failed", run_id=report.run_id)
     return report

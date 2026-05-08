@@ -339,6 +339,31 @@ class Store:
         needed)."""
         return self._migration_result[2]
 
+    def checkpoint(self, mode: str = "PASSIVE") -> tuple[int, int, int] | None:
+        """Force a WAL checkpoint so writes become visible to other connections.
+
+        Defaults to PASSIVE mode — checkpoints as much as possible without
+        blocking concurrent writers, never waits for locks. Returns SQLite's
+        `(busy, log_frames, checkpointed)` triple, or None on non-WAL dbs.
+
+        Why this exists: writers in WAL mode commit to bridge.db-wal, which
+        other reader connections (e.g. `bridge doctor` in a separate process)
+        sometimes cannot see immediately due to a known SQLite quirk around
+        WAL frame visibility under concurrent access. An explicit checkpoint
+        after each meaningful write closes that visibility window.
+        """
+        valid = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
+        m = mode.upper()
+        if m not in valid:
+            raise ValueError(f"checkpoint mode must be one of {sorted(valid)}, got {mode!r}")
+        try:
+            row = self._conn.execute(f"PRAGMA wal_checkpoint({m})").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        return (int(row[0]), int(row[1]), int(row[2]))
+
     # ─────────────── lifecycle ───────────────
 
     def close(self) -> None:

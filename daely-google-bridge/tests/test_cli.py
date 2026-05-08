@@ -399,16 +399,18 @@ def test_doctor_missing_tokens_fail(tmp_path, capsys):
     assert "[FAIL] google refresh-token:" in out
 
 
-def test_doctor_no_sync_yet_warns(tmp_path, capsys):
+def test_doctor_no_sync_yet_is_ok(tmp_path, capsys):
+    """Empty sync_history is a valid post-startup state, not a warning."""
     config_path, _ = _doctor_fixture_full(tmp_path, with_recent_sync=False)
     args = MagicMock()
     args.config = str(config_path)
     args.live = False
     rc = cmd_doctor(args)
-    assert rc == 2
     out = capsys.readouterr().out
-    assert "Overall: WARN" in out
-    assert "no sync recorded yet" in out
+    assert rc == 0
+    assert "Overall: OK" in out
+    assert "pending" in out
+    assert "[OK]   last sync:" in out
 
 
 def test_doctor_stale_sync_warns(tmp_path, capsys):

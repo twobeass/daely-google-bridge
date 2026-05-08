@@ -589,6 +589,14 @@ def cmd_doctor(
     except Exception as e:
         _doctor_print(DOCTOR_FAIL, "database:", f"could not open {cfg.db_path}: {e}")
         return DOCTOR_EXIT_FAIL
+    # Force a WAL checkpoint right after open so this read-only doctor process
+    # sees any writes that the daemon's connection has committed but not yet
+    # checkpointed. Belt-and-suspenders: sync._finalize already checkpoints
+    # after each cycle, but doing it here covers exec-races during a sync.
+    try:
+        store.checkpoint()
+    except Exception:
+        pass  # checkpoint is best-effort; never fail doctor over it
     _doctor_print(DOCTOR_OK, "database:",
                   f"schema v{store.schema_version} at {cfg.db_path}")
 
@@ -631,10 +639,11 @@ def cmd_doctor(
     history = store.recent_sync_history(limit=10)
     now = datetime.now(timezone.utc)
     if not history:
-        _doctor_print(DOCTOR_WARN, "last sync:",
-                      "no sync recorded yet — bridge hasn't run a cycle")
-        if overall == DOCTOR_EXIT_OK:
-            overall = DOCTOR_EXIT_WARN
+        # Post-restart / fresh-bridge state. Not an error condition —
+        # the next cycle will populate. Downgraded to OK so the doctor
+        # output isn't yellow during the first 30s of every restart.
+        _doctor_print(DOCTOR_OK, "last sync:",
+                      "pending — first cycle hasn't completed yet")
     else:
         last = history[0]
         age_s = (now - last.completed_at).total_seconds()

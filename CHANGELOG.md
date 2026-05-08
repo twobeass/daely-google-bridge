@@ -12,6 +12,31 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [0.1.1] - 2026-05-08
+
+Patch-Release. Härtet die SQLite-WAL-Sichtbarkeit zwischen dem Daemon-
+Schreibprozess und parallelen Reader-Prozessen (z. B. `bridge doctor` via
+`docker compose exec`).
+
+### Behoben
+- **WAL-Sichtbarkeits-Race**: nach jedem Sync-Cycle stellt `sync._finalize`
+  jetzt einen expliziten `PRAGMA wal_checkpoint(PASSIVE)` aus, sobald die
+  `sync_history`-Zeile geschrieben ist. Damit sehen frisch geöffnete
+  Reader-Connections (zweiter Prozess, separate `sqlite3.connect`) die Zeile
+  sofort, ohne auf SQLites Auto-Checkpoint zu warten.
+- **`bridge doctor` macht eigenen Checkpoint**: ruft `Store.checkpoint()`
+  direkt nach Init auf, damit der Read alles inkl. ungefachecktes WAL-
+  Material sieht — Belt-and-Suspenders zur ersten Maßnahme.
+- **`bridge doctor` zeigt nicht mehr `[WARN]` direkt nach Container-Start**:
+  ein leeres `sync_history` ist ein normaler Post-Restart-Zustand, kein
+  Fehler. Der Output ist jetzt `[OK] last sync: pending — first cycle
+  hasn't completed yet`.
+
+### Hinzugefügt
+- `Store.checkpoint(mode="PASSIVE"|"FULL"|"RESTART"|"TRUNCATE")` als
+  öffentliche API. Returns SQLites `(busy, log_frames, checkpointed)`-Tripel
+  oder `None` bei Non-WAL-DBs.
+
 ## [0.1.0] - 2026-05-08
 
 Erstes getaggtes Release. Konsolidiert alles vom RE-Abschluss über die
@@ -131,5 +156,6 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.1
 [0.1.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v0.1.0
