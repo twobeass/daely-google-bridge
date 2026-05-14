@@ -115,6 +115,42 @@ events_sorted = sorted(events, key=lambda e: e.recurringId is not None)
 # zuerst alle mit recurringId is None, dann alle mit recurringId
 ```
 
+### Recurring-Instance-Löschung (§3.1, seit v1.2.0)
+
+**Problem.** Daely expandiert Serien server-seitig. Wenn der User auf dem
+Tablet **eine einzelne Instanz** einer Serie löscht, **lässt Daely diese
+Instanz lautlos aus der Expansion weg** — der Master-`RRULE` bleibt
+unverändert, es gibt **kein** `deleted=true`-Tombstone und **kein**
+`EXDATE` (verifiziert per Live-Read, Probe 4, Mai 2026).
+
+Die Bridge spiegelt aber nur den Master + `RRULE` nach Google und lässt
+Google die Serie expandieren → ohne Gegenmaßnahme erscheint die gelöschte
+Instanz in Google weiter.
+
+**Lösung.** `mapper.compute_series_exdates()` nimmt **alle** gefetchten
+Instanzen einer Serie, expandiert die `RRULE` über den beobachteten
+Bereich `[früheste, späteste]`, difft gegen die tatsächlich gelieferten
+Termine und synthetisiert `EXDATE;TZID=…`-Zeilen für die Lücken. Diese
+werden ans `body["recurrence"]` des Master-Events gehängt.
+
+- Wall-Clock-/Naive-Zeit-Arithmetik → DST-sicher (Google wendet die
+  `TZID` an).
+- `compute_series_exdates` läuft in `sync._process_calendar` **vor**
+  `deduplicate_recurring` (danach sind die Einzel-Instanzen weg).
+- **Bekannte Grenze**: eine gelöschte **erste** oder **letzte** Instanz
+  einer Serie ist nicht erkennbar — es fehlt der Nachbar zum Diffen, der
+  beobachtete Bereich beginnt/endet einfach später. Akzeptiert.
+- **Verschobene** (statt gelöschte) Instanzen sind noch nicht behandelt —
+  die würden als „Lücke am alten Platz" + „Extra-Instanz am neuen Platz"
+  erscheinen. In den Live-Daten nicht beobachtet; bei Bedarf separates
+  Feature (modified-instance-exception mit `recurringEventId` +
+  `originalStartTime`).
+
+> **Patch-Trigger-Gotcha**: nach dem v1.2.0-Update bekommen Bestands-
+> Serien die EXDATEs **nicht** automatisch (Daely's `event.updated`
+> ändert sich ja nicht). Einmalig `bridge resync` (oder
+> `bridge re-color`) laufen lassen → forciert Re-Patch aller Mappings.
+
 ### Was passiert, wenn der User in Google etwas löscht/ändert
 
 - **Löschen in Google**: Beim nächsten Bridge-Poll erkennt der Bridge dies erst beim nächsten Schreib-Versuch. `events_patch` auf eine gelöschte Google-ID liefert 404 → Bridge tut: `events_insert` neu, **store updaten** mit neuer google_id. Effekt: Re-Creation. **Feature, kein Bug**.

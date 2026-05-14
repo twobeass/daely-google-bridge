@@ -36,6 +36,7 @@ from .google_client import GoogleClient
 from .mapper import (
     daely_event_to_google,
     deduplicate_recurring,
+    exdates_by_recurring_id,
     select_target_calendar_id,
     should_skip_calendar,
 )
@@ -149,6 +150,7 @@ def _process_event(
     profiles_map: dict[str, Profile] | None,
     apply_colors: bool,
     color_overrides: dict[str, str] | None,
+    recurrence_exdates: list[str] | None,
     report: SyncReport,
 ) -> None:
     """Handle one (already-deduped) Daely event."""
@@ -168,6 +170,7 @@ def _process_event(
         profiles_map=profiles_map,
         apply_colors=apply_colors,
         color_overrides=color_overrides,
+        recurrence_exdates=recurrence_exdates,
     )
     if body is None:
         # mapper said skip — should be unreachable here (caller pre-filters by
@@ -286,6 +289,11 @@ def _process_calendar(
         ))
         return
 
+    # §3.1: compute EXDATEs per recurring series BEFORE dedup — we need the
+    # full instance list to detect occurrences Daely silently dropped. After
+    # dedup we only keep the master, so the gap signal would be gone.
+    series_exdates = exdates_by_recurring_id(cwe.events)
+
     deduped = deduplicate_recurring(cwe.events)
     seen_keys = {_store_key(e) for e in deduped if not e.deleted}
 
@@ -300,6 +308,9 @@ def _process_calendar(
             profiles_map=profiles_map,
             apply_colors=apply_colors,
             color_overrides=color_overrides,
+            recurrence_exdates=(
+                series_exdates.get(ev.recurringId) if ev.recurringId else None
+            ),
             report=report,
         )
 

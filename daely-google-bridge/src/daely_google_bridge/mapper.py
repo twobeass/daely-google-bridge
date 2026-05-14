@@ -32,7 +32,10 @@ Mapping decisions (see findings/05_EVENT_MODEL.md, 06_BRIDGE_ARCHITECTURE.md,
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+from dateutil.rrule import rrulestr
 
 from .colors import emoji_for_color_id, nearest_color_id
 from .models import (
@@ -101,6 +104,104 @@ def deduplicate_recurring(events: list[CalendarEvent]) -> list[CalendarEvent]:
         elif ev.recurringId not in emitted_masters and first_index[ev.recurringId] == idx:
             out.append(earliest_by_master[ev.recurringId])
             emitted_masters.add(ev.recurringId)
+    return out
+
+
+# ─────────────────── recurring-instance deletions (§3.1) ───────────────────
+
+_UNTIL_RE = re.compile(r";UNTIL=[^;]*", re.IGNORECASE)
+
+
+def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
+    """Detect instances deleted from a recurring series, return EXDATE lines.
+
+    Daely expands recurring events server-side, and when the user deletes a
+    single occurrence Daely simply *omits* it from the expansion — the master
+    RRULE stays unchanged, no `deleted=true` tombstone, no EXDATE
+    (confirmed via live read, see findings/06). Google therefore re-expands
+    the full RRULE and the deleted occurrence stays visible.
+
+    This function takes ALL fetched instances of one series, expands the RRULE
+    over the *observed* range `[earliest, latest]`, diffs against the dates
+    Daely actually returned, and emits `EXDATE;TZID=…` lines for the gaps.
+
+    Works in naive wall-clock time so it's DST-safe — Google applies the
+    TZID. Returns `[]` when there's no gap, fewer than 2 timed instances,
+    or no RRULE.
+
+    Known limitation: a deleted *first* or *last* occurrence of a series is
+    undetectable — there's no surviving neighbour to diff against, so the
+    observed range simply starts/ends later. Acceptable; documented.
+    """
+    # Only timed recurring instances — all-day recurring series would need
+    # DATE-valued EXDATEs; not observed in live data, handled defensively
+    # by the `dateTime is not None` filter (all-day instances are skipped).
+    timed = [e for e in instances if e.start.dateTime is not None]
+    if len(timed) < 2:
+        return []
+
+    def _wall(ev: CalendarEvent):
+        # Strip tzinfo → naive wall-clock. DST-safe: the EXDATE carries TZID.
+        return ev.start.dateTime.replace(tzinfo=None)
+
+    timed.sort(key=_wall)
+    earliest = timed[0]
+
+    rrule_lines = [
+        r for r in (earliest.recurrence or [])
+        if r.upper().startswith("RRULE")
+    ]
+    if not rrule_lines:
+        return []
+
+    # Strip UNTIL — it's usually UTC ("…Z") and would clash with our naive
+    # dtstart inside dateutil. We bound expansion with `.between()` anyway,
+    # and `latest` never exceeds UNTIL (it's an actually-returned instance).
+    rrule_clean = _UNTIL_RE.sub("", rrule_lines[0])
+
+    dtstart = _wall(earliest)
+    latest = _wall(timed[-1])
+    try:
+        rule = rrulestr(rrule_clean, dtstart=dtstart)
+        expected = set(rule.between(dtstart, latest, inc=True))
+    except (ValueError, TypeError):
+        # Malformed RRULE — don't guess, just emit nothing.
+        return []
+
+    actual = {_wall(e) for e in timed}
+    missing = sorted(expected - actual)
+    if not missing:
+        return []
+
+    tz = earliest.start.timeZone
+    exdates: list[str] = []
+    for dt in missing:
+        stamp = dt.strftime("%Y%m%dT%H%M%S")
+        if tz:
+            exdates.append(f"EXDATE;TZID={tz}:{stamp}")
+        else:
+            # No timezone on the source event — emit a floating EXDATE.
+            exdates.append(f"EXDATE:{stamp}")
+    return exdates
+
+
+def exdates_by_recurring_id(events: list[CalendarEvent]) -> dict[str, list[str]]:
+    """Group `events` by `recurringId` and compute EXDATEs for each series.
+
+    Returns `{recurringId: [exdate_line, …]}` — only series with at least
+    one detected gap appear in the dict. Non-recurring events are ignored.
+    """
+    by_series: dict[str, list[CalendarEvent]] = {}
+    for ev in events:
+        if ev.recurringId is None:
+            continue
+        by_series.setdefault(ev.recurringId, []).append(ev)
+
+    out: dict[str, list[str]] = {}
+    for rid, instances in by_series.items():
+        exdates = compute_series_exdates(instances)
+        if exdates:
+            out[rid] = exdates
     return out
 
 
@@ -270,6 +371,7 @@ def daely_event_to_google(
     *,
     apply_colors: bool = False,
     color_overrides: dict[str, str] | None = None,
+    recurrence_exdates: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Convert a Daely event to a Google Calendar event body dict.
 
@@ -289,6 +391,12 @@ def daely_event_to_google(
     `profile_calendar_map` is currently only used for callers' validation; kept
     in the signature so future enhancements (per-event target override) don't
     require an API change.
+
+    `recurrence_exdates` (§3.1): EXDATE lines computed by
+    `compute_series_exdates()` for this event's series — appended to
+    `body["recurrence"]` so Google omits the occurrences the user deleted in
+    Daely. Only applied when the event is itself recurring (`event.recurrence`
+    non-empty). Ignored otherwise.
     """
     if should_skip_calendar(calendar):
         return None
@@ -331,7 +439,13 @@ def daely_event_to_google(
     if event.location:
         body["location"] = event.location
     if event.recurrence:
-        body["recurrence"] = list(event.recurrence)
+        recurrence = list(event.recurrence)
+        # §3.1: append synthesized EXDATE lines for occurrences the user
+        # deleted in Daely (Daely drops them from the expansion but never
+        # touches the master RRULE — so without this, Google re-shows them).
+        if recurrence_exdates:
+            recurrence.extend(recurrence_exdates)
+        body["recurrence"] = recurrence
     if event.privateEvent:
         body["visibility"] = "private"
     return body
@@ -355,8 +469,10 @@ def select_target_calendar_id(
 
 
 __all__ = [
+    "compute_series_exdates",
     "daely_event_to_google",
     "deduplicate_recurring",
+    "exdates_by_recurring_id",
     "is_recurring_instance_skip",
     "select_target_calendar_id",
     "should_skip_calendar",

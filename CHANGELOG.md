@@ -12,6 +12,59 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.2.0] - 2026-05-14
+
+**Behebt §3.1** — aus einer Serie gelöschte Einzel-Termine bleiben nicht
+mehr in Google hängen.
+
+### Hinzugefügt
+- **EXDATE-Synthese für gelöschte Serien-Instanzen.** Wenn der User auf
+  dem Tablet eine einzelne Instanz einer wiederkehrenden Serie löscht,
+  lässt Daely sie lautlos aus der Expansion weg — `RRULE` bleibt
+  unverändert, kein `deleted`-Flag, kein `EXDATE` (per Live-Read
+  bestätigt). Die Bridge spiegelte bisher nur den Master + `RRULE` →
+  Google expandierte die Serie voll → die gelöschte Instanz blieb
+  sichtbar.
+
+  Neu: `mapper.compute_series_exdates()` expandiert die `RRULE` über den
+  beobachteten Bereich, difft gegen die tatsächlich gelieferten Instanzen
+  und synthetisiert `EXDATE;TZID=…`-Zeilen für die Lücken. Diese werden
+  ans `recurrence`-Feld des Google-Master-Events gehängt. DST-sicher über
+  Wall-Clock-Zeit-Arithmetik. 17 neue Tests.
+- `mapper.exdates_by_recurring_id()` — gruppiert Events nach Serie und
+  liefert `{recurringId: [EXDATE…]}` nur für Serien mit erkannten Lücken.
+- `daely_event_to_google()` akzeptiert `recurrence_exdates`-kwarg.
+- Neue Dependency: `python-dateutil>=2.9` (für RRULE-Expansion).
+- `findings/10`-Style Live-Read-Befund in `findings/06_BRIDGE_ARCHITECTURE.md`
+  dokumentiert (Probe 4 — Daely lässt gelöschte Instanzen weg, Hypothese A2).
+
+### Geändert
+- Realtime-Client (weiterhin experimentell) schickt den Access-Token jetzt
+  zusätzlich als `?access_token=`-Query-Parameter — die kanonische
+  SignalR-über-SSE-Konvention. Hat das Notification-Problem im Single-
+  Account-Setup **nicht** gelöst (siehe v1.1.0-Caveat), ist aber
+  protokoll-korrekter und schadet nicht.
+
+### Bekannte Grenzen
+- **Verschobene** (statt gelöschte) Instanzen werden noch nicht behandelt —
+  separates Feature (modified-instance-exceptions). In den Live-Daten nicht
+  beobachtet.
+- Eine gelöschte **erste oder letzte** Instanz einer Serie ist nicht
+  erkennbar (kein Nachbar zum Diffen).
+
+### ⚠️ Nach dem Update: einmal `bridge resync`
+Bestands-Serien bekommen die EXDATEs **nicht** automatisch — die Bridge
+patcht nur, wenn sich Daely's `event.updated` ändert (Patch-Trigger-Gotcha).
+Nach dem Update auf v1.2.0 einmalig:
+
+```bash
+docker compose exec bridge bridge resync
+docker compose restart bridge
+```
+
+→ forciert beim nächsten Sync-Cycle ein Re-Patch aller Mappings, die
+gelöschten Serien-Instanzen verschwinden dann aus Google.
+
 ## [1.1.0] - 2026-05-08
 
 **Stable.** Schließt das Realtime-Kapitel mit ehrlicher Bestandsaufnahme
@@ -293,7 +346,8 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.2.0
 [1.1.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.1.0
 [1.0.3]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.3
 [1.0.2]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.2

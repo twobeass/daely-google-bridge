@@ -266,8 +266,17 @@ class RealtimeClient:
             log.info("realtime.negotiate_ok",
                      token_len=len(connection_token))
 
-            # 2. Open SSE GET in this thread (we'll iterate it inline)
-            url = f"{self._api_base}/realtime?id={connection_token}"
+            # 2. Open SSE GET in this thread (we'll iterate it inline).
+            # Token goes BOTH as header AND as `?access_token=` query param —
+            # ASP.NET Core SignalR's SSE auth middleware reads the query
+            # param to identify the user (browser EventSource can't add
+            # headers, so query is the canonical SignalR-on-SSE pattern).
+            # The "access_token" string was found in the Dart-AOT constants
+            # pool, confirming the Daely backend uses this convention.
+            url = (
+                f"{self._api_base}/realtime?id={connection_token}"
+                f"&access_token={access_token}"
+            )
             with client.stream(
                 "GET", url,
                 headers={

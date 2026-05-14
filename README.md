@@ -225,7 +225,10 @@ löst das beim Callback wieder auf den richtigen Listener auf.
    Google.\
 ✅ Server-seitig expandierte Recurring-Events werden **dedupliziert**: nur
    das Master-Event mit der ursprünglichen `RRULE` landet bei Google,
-   Google expandiert dann selbst.\
+   Google expandiert dann selbst. Wird eine **einzelne Instanz** einer
+   Serie in Daely gelöscht, synthetisiert die Bridge die passende
+   `EXDATE`-Zeile, damit Google die Instanz ebenfalls auslässt (seit
+   v1.2.0).\
 ✅ Profil-UUIDs in `additionalParticipants` werden in Klartext-Namen
    aufgelöst und als **„👥 Beteiligt: …"-Footer** an die Description
    gehängt — damit du im Widget direkt siehst, wer der Termin betrifft.\
@@ -534,7 +537,7 @@ committen.
 
 ## Status
 
-**v1.1.0 — Stable.** Feature-complete für den primären Use-Case (Polling-
+**v1.2.0 — Stable.** Feature-complete für den primären Use-Case (Polling-
 basierter Sync). Realtime-Push ist als experimentelle Erweiterung enthalten,
 aber im Single-Account-Test nie produktiv geworden — Details unten.
 
@@ -546,6 +549,7 @@ aber im Single-Account-Test nie produktiv geworden — Details unten.
 | 3d | ✅ | Sync-Orchestrator + Scheduler |
 | 3e | ✅ | Profil-Footer in Event-Description |
 | 3f | ✅ | Profil-Color → Google `colorId` + Multi-Participant-Title-Prefix |
+| 3.1 | ✅ | EXDATE-Synthese: gelöschte Serien-Instanzen verschwinden aus Google |
 | Ops | ✅ | Schema-Migration-Framework, Retry-Loop, Sync-History |
 | Tools | ✅ | `bridge resync` / `bridge re-color` / `bridge doctor` |
 | Health | ✅ | `/healthz` + `/readyz` + `/status` HTTP-Endpoints |

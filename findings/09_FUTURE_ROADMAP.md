@@ -79,7 +79,7 @@ inkl. Tests + Doku):
 | 1.7   | Quota-aware Backoff für Google                   | Engine    | ★☆☆  | S      | 🟢     | partial  | Maybe         |
 | 2.1   | Device-Code-Flow statt ROPC (MFA-Support)        | Auth      | ☆☆☆  | M      | 🟡     | obsolete | No (Daely bietet kein MFA) |
 | 2.2   | Token-Encryption-at-Rest in SQLite               | Auth      | ★☆☆  | M      | 🟢     | open     | No            |
-| 3.1   | Recurring-Instance-Overrides (Modified Instances)| Mapping   | ★★☆  | L      | 🟡     | open     | Maybe         |
+| 3.1   | Recurring-Instance-Deletions (EXDATE-Synthese)   | Mapping   | ★★★  | M      | 🟢     | **done v1.2.0** | — (Moved-instances noch offen) |
 | 3.2   | Reicheres Reminder-Mapping (multi-method)        | Mapping   | ★☆☆  | S      | 🟢     | open     | Maybe         |
 | 3.3   | Daely-Participants → Google-Attendees            | Mapping   | ★☆☆  | M      | 🟡     | open     | No            |
 | 3.4   | Location-Geocoding für Maps-Links                | Mapping   | ★☆☆  | M      | 🟢     | open     | No            |
@@ -319,32 +319,40 @@ nicht code-seitig lösen.
 
 ## 3 — Content-Mapping (Daely → Google)
 
-### 3.1 Recurring-Instance-Overrides (Modified Instances)
+### 3.1 Recurring-Instance-Deletions — **erledigt in v1.2.0**
 
-**Was.** Daely expandiert Recurring-Events server-seitig in einzelne
-Instanzen (siehe `findings/05_EVENT_MODEL.md`). Wenn der User in der
-Daely-App **eine einzelne Instanz** modifiziert (z. B. Verschiebung um
-30 min), kommt sie als Instanz mit abweichendem `start.dateTime` und
-`updated`-Timestamp, aber gleichem `recurringId`. Die Bridge dropt sie
-heute zugunsten der Master-Instanz (per Dedup-Logik).
+**Was war das Problem.** Daely expandiert Recurring-Events server-seitig.
+Wenn der User **eine einzelne Instanz** einer Serie löscht, lässt Daely
+sie lautlos aus der Expansion weg — `RRULE` unverändert, kein
+`deleted=true`, kein `EXDATE`. Die Bridge spiegelte nur Master + `RRULE`
+→ Google expandierte voll → die gelöschte Instanz blieb sichtbar.
 
-**Wie.** Auf Google-Seite gibt's `RECURRENCE-ID` (Modified Instances) — exact
-das gleiche Modell wie iCal. Die Bridge müsste:
-1. Master + RRULE wie heute schreiben
-2. Pro abweichende Instanz ein zusätzliches Event mit `recurringEventId`
-   (Google) und `originalStartTime` schreiben
-3. Im `event_mapping`-Store separate Rows pro Override-Instanz halten
+**Live-Read-Befund (Probe 4, 2026-05-14).** Drei Hypothesen geprüft:
+- A1 (Daely-RRULE hat EXDATE) → **nein**
+- A2 (Daely lässt Instanz weg) → **ja, bestätigt**
+- A3 (`deleted=true`-Tombstone) → **nein**
 
-**Risiken.** Komplexes Diff-Handling (was, wenn der User in Daely eine
-Override revoked?). Tests fixture-intensiv.
+Konkret: zwei wöchentliche Donnerstags-Serien des Users hatten am gleichen
+Datum eine Lücke (delta 14 bzw. 21 Tage statt 7).
 
-**Wert/Aufwand.** Selten, aber wenn's fehlt, ist's ein „Bridge sync ist
-falsch"-Bug. **Wert ★★☆, Komplexität L** (~5 Tage inkl. Live-Read-Session
-für override-Instances + Mapper-Refactor + Test-Fixtures).
+**Lösung (umgesetzt).** `mapper.compute_series_exdates()`:
+1. Alle gefetchten Instanzen einer Serie nehmen
+2. `RRULE` von der frühesten Instanz mit `dateutil.rrule` expandieren
+   (Wall-Clock/naiv → DST-sicher; `UNTIL` vorher gestrippt)
+3. Erwartete Termine vs. tatsächlich gelieferte diffen
+4. Fehlende → `EXDATE;TZID=…`-Zeilen, an `body["recurrence"]` gehängt
+- `sync._process_calendar` ruft das **vor** der Dedup auf (danach sind die
+  Einzel-Instanzen weg).
 
-**Empfehlung.** *Maybe.* Erst, wenn der User es als Pain-Point meldet
-(z. B. „Termin X ist letzte Woche ausgefallen, in Google steht er noch").
-Vorher ist's spekulativ.
+**Bewusst nicht behandelt** (Folge-Feature, kein Live-Bedarf beobachtet):
+- **Verschobene** Instanzen (Modified Instances mit `recurringEventId` +
+  `originalStartTime`) — würde ein zweites Event pro Override + separate
+  Store-Rows brauchen.
+- Gelöschte **erste/letzte** Instanz einer Serie — kein Nachbar zum
+  Diffen, undetektierbar. Dokumentierte Grenze.
+
+**Aufwand real:** ~M (1 Tag), nicht L — die EXDATE-Synthese ist deutlich
+simpler als das volle Modified-Instance-Modell. 17 neue Tests.
 
 ---
 
@@ -899,7 +907,9 @@ Robustheit-Plus + Operations-Komfort komplett umgesetzt:
 
 Alles andere; in Reihenfolge persönlicher Neugierde, nicht nach UX-Wert:
 
-1. §3.1 Recurring-Instance-Overrides — wenn Pain-Point auftaucht
+1. §3.1 Recurring-Instance-**Deletions** — ✅ erledigt in v1.2.0.
+   Verbleibt: verschobene Instanzen (Modified Instances) — separates
+   Feature, bisher kein Live-Bedarf
 2. §8.3 `.ics`-Export-Endpoint — wenn HA-Integration relevant wird
 3. §5.3 `bridge profile list/show` — Diagnose-Komfort, sehr klein
 4. §4.1 + §4.2 Photo-Bridge — wenn das ursprüngliche Mission-Ziel

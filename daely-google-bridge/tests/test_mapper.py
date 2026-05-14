@@ -15,8 +15,10 @@ import json
 import pytest
 
 from daely_google_bridge.mapper import (
+    compute_series_exdates,
     daely_event_to_google,
     deduplicate_recurring,
+    exdates_by_recurring_id,
     is_recurring_instance_skip,
     select_target_calendar_id,
     should_skip_calendar,
@@ -771,3 +773,232 @@ def test_event_customColorCode_does_NOT_affect_google_colorId():
     assert body["colorId"] == "11"  # profile, not event-customColorCode
     # extProp still mirrors the raw event override for diagnostics.
     assert body["extendedProperties"]["private"]["daely_custom_color"] == "#0b8043"
+
+
+# ─────────────── §3.1 — recurring-instance deletions (EXDATE synthesis) ───────────────
+
+def _recurring_instance(
+    *,
+    recurring_id: str,
+    start_iso: str,
+    rrule: str = "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH",
+    tz: str = "Europe/Berlin",
+    instance_id: str | None = None,
+) -> CalendarEvent:
+    """Build one instance of a recurring series.
+
+    Mirrors the live-data shape: every instance carries the same recurringId
+    and the same `recurrence` RRULE; the composite id encodes the start.
+    """
+    return CalendarEvent.model_validate({
+        "id": instance_id or f"{recurring_id}_{start_iso.replace(':', '').replace('-', '')}",
+        "recurringId": recurring_id,
+        "deleted": False,
+        "title": "Recurring sample",
+        "description": "",
+        "location": None,
+        "start": {"dateTime": start_iso, "timeZone": tz, "date": None},
+        "end": {"dateTime": start_iso, "timeZone": tz, "date": None},
+        "created": "2026-04-27T15:03:07+00:00",
+        "updated": "2026-04-27T15:03:07+00:00",
+        "recurrence": [rrule],
+        "reminders": [], "customColorCode": None, "additionalParticipants": [],
+        "editable": True, "hasError": False, "privateEvent": False,
+    })
+
+
+def test_compute_exdates_clean_series_returns_empty():
+    """A series with no gaps yields no EXDATEs."""
+    rid = "00000000-0000-0000-0005-0000000000a1"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00")
+        for d in (7, 14, 21, 28)  # four consecutive Thursdays
+    ]
+    assert compute_series_exdates(instances) == []
+
+
+def test_compute_exdates_single_gap():
+    """One missing Thursday in the middle → one EXDATE with matching time."""
+    rid = "00000000-0000-0000-0005-0000000000a2"
+    # 05-07, [05-14 missing], 05-21, 05-28
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00")
+        for d in (7, 21, 28)
+    ]
+    exdates = compute_series_exdates(instances)
+    assert exdates == ["EXDATE;TZID=Europe/Berlin:20260514T155000"]
+
+
+def test_compute_exdates_multiple_gaps():
+    """Two missing Thursdays → two EXDATEs, sorted."""
+    rid = "00000000-0000-0000-0005-0000000000a3"
+    # 05-07, [05-14, 05-21 missing], 05-28
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00")
+        for d in (7, 28)
+    ]
+    exdates = compute_series_exdates(instances)
+    assert exdates == [
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+    ]
+
+
+def test_compute_exdates_preserves_instance_time_of_day():
+    """EXDATE time component must match the series' wall-clock time exactly,
+    or Google won't match the occurrence."""
+    rid = "00000000-0000-0000-0005-0000000000a4"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T13:45:00+02:00")
+        for d in (7, 21)  # 05-14 missing
+    ]
+    exdates = compute_series_exdates(instances)
+    assert exdates == ["EXDATE;TZID=Europe/Berlin:20260514T134500"]
+
+
+def test_compute_exdates_dst_boundary_is_wall_clock_safe():
+    """Across the spring DST change (last Sunday of March in Europe/Berlin),
+    a weekly series stays at the same wall-clock time. EXDATE must use wall
+    time, not a shifted UTC instant."""
+    rid = "00000000-0000-0000-0005-0000000000a5"
+    # Weekly Sundays around the 2026-03-29 DST switch (+01:00 → +02:00).
+    # 03-22 is +01:00, 04-05 is +02:00; 03-29 (the switch day) is "missing".
+    instances = [
+        _recurring_instance(
+            recurring_id=rid,
+            start_iso="2026-03-22T10:00:00+01:00",
+            rrule="RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU",
+        ),
+        _recurring_instance(
+            recurring_id=rid,
+            start_iso="2026-04-05T10:00:00+02:00",
+            rrule="RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU",
+        ),
+    ]
+    exdates = compute_series_exdates(instances)
+    # 03-29 missing, at wall-clock 10:00 regardless of the offset shift
+    assert exdates == ["EXDATE;TZID=Europe/Berlin:20260329T100000"]
+
+
+def test_compute_exdates_too_few_instances_returns_empty():
+    rid = "00000000-0000-0000-0005-0000000000a6"
+    single = [_recurring_instance(recurring_id=rid, start_iso="2026-05-07T15:50:00+02:00")]
+    assert compute_series_exdates(single) == []
+    assert compute_series_exdates([]) == []
+
+
+def test_compute_exdates_no_rrule_returns_empty():
+    """An instance group with no RRULE on the earliest entry → no EXDATEs."""
+    rid = "00000000-0000-0000-0005-0000000000a7"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso="2026-05-07T15:50:00+02:00", rrule=""),
+        _recurring_instance(recurring_id=rid, start_iso="2026-05-28T15:50:00+02:00", rrule=""),
+    ]
+    # rrule="" → recurrence list has one empty string, filtered out
+    assert compute_series_exdates(instances) == []
+
+
+def test_compute_exdates_until_clause_is_stripped_safely():
+    """RRULEs with a UTC UNTIL (…Z) must not crash the naive expansion."""
+    rid = "00000000-0000-0000-0005-0000000000a8"
+    rrule = "RRULE:FREQ=WEEKLY;UNTIL=20260625T235900Z;INTERVAL=1;BYDAY=TH"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00", rrule=rrule)
+        for d in (7, 28)  # 05-14, 05-21 missing
+    ]
+    exdates = compute_series_exdates(instances)
+    assert exdates == [
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+    ]
+
+
+def test_compute_exdates_malformed_rrule_returns_empty():
+    rid = "00000000-0000-0000-0005-0000000000a9"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso="2026-05-07T15:50:00+02:00",
+                            rrule="RRULE:THIS-IS-NOT-VALID"),
+        _recurring_instance(recurring_id=rid, start_iso="2026-05-28T15:50:00+02:00",
+                            rrule="RRULE:THIS-IS-NOT-VALID"),
+    ]
+    # Defensive: don't guess on a malformed rule
+    assert compute_series_exdates(instances) == []
+
+
+def test_compute_exdates_leading_deletion_undetectable():
+    """Documented limitation: a deleted FIRST occurrence has no surviving
+    neighbour before it — the observed range just starts later, so it's
+    indistinguishable from a series that legitimately starts then."""
+    rid = "00000000-0000-0000-0005-0000000000aa"
+    # True series would be 05-07, 05-14, 05-21 — but 05-07 was deleted.
+    # We only see 05-14, 05-21 → no gap detected.
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00")
+        for d in (14, 21)
+    ]
+    assert compute_series_exdates(instances) == []
+
+
+def test_exdates_by_recurring_id_groups_and_filters():
+    """exdates_by_recurring_id only returns series that actually have gaps."""
+    clean_rid = "00000000-0000-0000-0005-0000000000b1"
+    gap_rid = "00000000-0000-0000-0005-0000000000b2"
+    events = []
+    # clean series — 3 consecutive Thursdays
+    events += [
+        _recurring_instance(recurring_id=clean_rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00")
+        for d in (7, 14, 21)
+    ]
+    # gapped series — 05-14 missing
+    events += [
+        _recurring_instance(recurring_id=gap_rid, start_iso=f"2026-05-{d:02d}T09:00:00+02:00")
+        for d in (7, 21)
+    ]
+    # a non-recurring event in the mix — must be ignored
+    events.append(_ev_with_participants([], description="single event"))
+
+    result = exdates_by_recurring_id(events)
+    assert set(result.keys()) == {gap_rid}  # clean series not present
+    assert result[gap_rid] == ["EXDATE;TZID=Europe/Berlin:20260514T090000"]
+
+
+def test_mapper_appends_exdates_to_recurrence():
+    """daely_event_to_google appends recurrence_exdates to body['recurrence']."""
+    master = _recurring_instance(
+        recurring_id="00000000-0000-0000-0005-0000000000c1",
+        start_iso="2026-05-07T15:50:00+02:00",
+    )
+    exdates = ["EXDATE;TZID=Europe/Berlin:20260514T155000"]
+    body = daely_event_to_google(
+        master, _make_internal_calendar(), _profile_map(),
+        recurrence_exdates=exdates,
+    )
+    assert body is not None
+    assert body["recurrence"] == [
+        "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH",
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+    ]
+
+
+def test_mapper_no_exdates_leaves_recurrence_untouched():
+    master = _recurring_instance(
+        recurring_id="00000000-0000-0000-0005-0000000000c2",
+        start_iso="2026-05-07T15:50:00+02:00",
+    )
+    body = daely_event_to_google(
+        master, _make_internal_calendar(), _profile_map(),
+        recurrence_exdates=None,
+    )
+    assert body is not None
+    assert body["recurrence"] == ["RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH"]
+
+
+def test_mapper_exdates_ignored_for_non_recurring_event():
+    """recurrence_exdates on a non-recurring event is a no-op (no recurrence key)."""
+    ev = _ev_with_participants([], description="not recurring")
+    body = daely_event_to_google(
+        ev, _make_internal_calendar(), _profile_map(),
+        recurrence_exdates=["EXDATE;TZID=Europe/Berlin:20260514T155000"],
+    )
+    assert body is not None
+    assert "recurrence" not in body

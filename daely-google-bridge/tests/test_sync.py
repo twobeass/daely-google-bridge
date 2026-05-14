@@ -333,6 +333,88 @@ def test_full_sync_dedups_recurring_to_one_insert(store):
     assert store.get_event_mapping(master) is not None
 
 
+def test_full_sync_synthesizes_exdates_for_deleted_series_instance(store):
+    """§3.1: when Daely drops an occurrence from a recurring series (user
+    deleted a single instance), the bridge synthesizes EXDATE lines so the
+    Google master event omits it too."""
+    master = "00000000-0000-0000-0005-000000000020"
+    # Weekly Thursdays — but 2026-05-14 is MISSING (user deleted it in Daely).
+    # Daely returns 05-07, [gap], 05-21, 05-28 with the unchanged RRULE.
+    present = ["2026-05-07", "2026-05-21", "2026-05-28"]
+    events = [
+        _event(
+            id=f"{master}_{d.replace('-', '')}T135000Z",
+            recurringId=master,
+            recurrence=["RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH"],
+            start_dt=f"{d}T15:50:00+02:00",
+            end_dt=f"{d}T16:50:00+02:00",
+        )
+        for d in present
+    ]
+    cwes = [_calendar_with_events(events=events)]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+
+    report = full_sync(daely, google, store, _config())
+    assert report.inserts == 1
+    body = google.insert_event.call_args.args[1]
+    assert body["recurrence"] == [
+        "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH",
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+    ]
+
+
+def test_full_sync_no_exdates_when_series_is_complete(store):
+    """A gapless recurring series → recurrence stays just the RRULE."""
+    master = "00000000-0000-0000-0005-000000000021"
+    present = ["2026-05-07", "2026-05-14", "2026-05-21"]
+    events = [
+        _event(
+            id=f"{master}_{d.replace('-', '')}T135000Z",
+            recurringId=master,
+            recurrence=["RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH"],
+            start_dt=f"{d}T15:50:00+02:00",
+            end_dt=f"{d}T16:50:00+02:00",
+        )
+        for d in present
+    ]
+    cwes = [_calendar_with_events(events=events)]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+
+    full_sync(daely, google, store, _config())
+    body = google.insert_event.call_args.args[1]
+    assert body["recurrence"] == ["RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH"]
+
+
+def test_full_sync_exdates_multiple_gaps_in_one_series(store):
+    """Two deleted occurrences → two EXDATE lines."""
+    master = "00000000-0000-0000-0005-000000000022"
+    # 05-07, [05-14 + 05-21 deleted], 05-28
+    present = ["2026-05-07", "2026-05-28"]
+    events = [
+        _event(
+            id=f"{master}_{d.replace('-', '')}T135000Z",
+            recurringId=master,
+            recurrence=["RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH"],
+            start_dt=f"{d}T15:50:00+02:00",
+            end_dt=f"{d}T16:50:00+02:00",
+        )
+        for d in present
+    ]
+    cwes = [_calendar_with_events(events=events)]
+    daely = _daely_mock(cwes)
+    google = _google_mock()
+
+    full_sync(daely, google, store, _config())
+    body = google.insert_event.call_args.args[1]
+    assert body["recurrence"] == [
+        "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH",
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+    ]
+
+
 # ─────────────── filter ───────────────
 
 def test_full_sync_skips_external_calendars(store):
