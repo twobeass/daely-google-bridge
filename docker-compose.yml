@@ -25,11 +25,17 @@ services:
     environment:
       - TZ=${TZ:-Europe/Berlin}
     command: ["run"]
+    # `bridge doctor` validates config/DB/tokens and flags a stale sync loop
+    # (last sync older than 2× poll_interval) — a real wedged-scheduler signal,
+    # unlike a bare liveness probe. Runs offline (no `--live`), and a parallel
+    # reader process is supported by design (WAL + explicit checkpoint).
+    # Earlier versions used `pgrep`, which isn't installed in the slim image.
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "bridge"]
-      interval: 60s
-      timeout: 5s
+      test: ["CMD", "bridge", "-c", "/app/config.yaml", "doctor"]
+      interval: 120s
+      timeout: 10s
       retries: 3
+      start_period: 60s
 
   # One-shot bootstrap helper. Run with:
   #   docker compose run --rm --service-ports bootstrap

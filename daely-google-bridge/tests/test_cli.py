@@ -90,6 +90,7 @@ def test_run_default_starts_scheduler_with_incremental(tmp_path):
         google_oauth_client_secrets_file=secrets,
         db_path=tmp_path / "bridge.db",
         poll_interval_minutes=7,
+        full_sync_interval_hours=12,
     )
     config_path = tmp_path / "config.yaml"
     save_config(cfg, config_path, backup=False)
@@ -112,12 +113,52 @@ def test_run_default_starts_scheduler_with_incremental(tmp_path):
         scheduler_factory=lambda: fake_scheduler,
     )
     assert rc == 0
-    # add_job called with interval=7m
-    fake_scheduler.add_job.assert_called_once()
-    call = fake_scheduler.add_job.call_args
-    assert call.args[1] == "interval"
-    assert call.kwargs["minutes"] == 7
+    jobs_by_id = {c.kwargs["id"]: c for c in fake_scheduler.add_job.call_args_list}
+    # Incremental poll on interval=7m.
+    incr = jobs_by_id["incremental"]
+    assert incr.args[1] == "interval"
+    assert incr.kwargs["minutes"] == 7
+    # Periodic full_sync on interval=12h.
+    full = jobs_by_id["full_sync"]
+    assert full.args[1] == "interval"
+    assert full.kwargs["hours"] == 12
     fake_scheduler.start.assert_called_once()
+
+
+def test_run_full_sync_interval_zero_disables_periodic_full_sync(tmp_path):
+    """full_sync_interval_hours=0 → only the incremental job is scheduled
+    (legacy behaviour: full_sync runs once at startup only)."""
+    secrets = tmp_path / "client.json"
+    secrets.write_text("{}")
+    cfg = BridgeConfig(
+        daely_email="t@example.com",
+        google_oauth_client_secrets_file=secrets,
+        db_path=tmp_path / "bridge.db",
+        poll_interval_minutes=7,
+        full_sync_interval_hours=0,
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+    args = MagicMock()
+    args.config = str(config_path)
+    args.once = False
+
+    fake_scheduler = MagicMock()
+    fake_scheduler.start.return_value = None
+
+    from daely_google_bridge.sync import SyncReport
+
+    rc = cmd_run(
+        args,
+        daely_factory=lambda s, c: MagicMock(close=MagicMock()),
+        google_factory=lambda s, c: MagicMock(),
+        full_sync_fn=MagicMock(return_value=SyncReport()),
+        incremental_sync_fn=MagicMock(),
+        scheduler_factory=lambda: fake_scheduler,
+    )
+    assert rc == 0
+    job_ids = {c.kwargs["id"] for c in fake_scheduler.add_job.call_args_list}
+    assert job_ids == {"incremental"}
 
 
 def test_run_no_daely_token_returns_1(tmp_path, capsys):

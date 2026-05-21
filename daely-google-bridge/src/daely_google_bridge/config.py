@@ -138,6 +138,12 @@ class BridgeConfig(BaseModel):
     poll_interval_minutes: int = 15
     lookback_days: int = 30
     lookahead_days: int = 365
+    # How often to run a full_sync (with store-vs-snapshot deletion detection)
+    # in addition to the incremental poll. The incremental cycle never removes
+    # events that vanished from Daely without a `deleted=true` flag — only
+    # full_sync does. 0 disables the periodic full_sync (it then runs only once
+    # at startup, the legacy behaviour).
+    full_sync_interval_hours: int = Field(default=24, ge=0)
 
     # Storage
     db_path: Path = Path("./bridge.db")
