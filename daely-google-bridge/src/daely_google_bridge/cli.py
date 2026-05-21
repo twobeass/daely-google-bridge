@@ -424,11 +424,34 @@ def cmd_run(
         except Exception:
             log.exception("run.realtime_sync_failed")
 
+    def _full_sync_job() -> None:
+        """Periodic full_sync — catches physical deletes (events gone from the
+        snapshot without a `deleted=true` flag) that the incremental cycle
+        never removes, plus any drift outside the incremental's acted-on set."""
+        try:
+            r = rsync(daely, google, store, cfg)
+            state.update_from_report(r)
+            _print_report(r)
+        except Exception:
+            log.exception("run.full_sync_failed")
+
     scheduler.add_job(
         _job, "interval", minutes=cfg.poll_interval_minutes, id="incremental",
     )
     log.info("run.scheduler_started", interval_min=cfg.poll_interval_minutes)
     print(f"\nIncremental sync every {cfg.poll_interval_minutes}m. Ctrl+C to stop.")
+
+    if cfg.full_sync_interval_hours > 0:
+        scheduler.add_job(
+            _full_sync_job, "interval",
+            hours=cfg.full_sync_interval_hours, id="full_sync",
+        )
+        log.info(
+            "run.full_sync_scheduled",
+            interval_hours=cfg.full_sync_interval_hours,
+        )
+        print(f"Full sync (with deletion detection) every "
+              f"{cfg.full_sync_interval_hours}h.")
 
     # ── Realtime push (optional; layered on top of polling) ──
     realtime_client = None

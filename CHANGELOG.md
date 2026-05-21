@@ -10,7 +10,32 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 ## [Unreleased]
 
-_(noch nichts.)_
+**Behebt stille Drift zwischen Daely und Google** — Änderungen und
+Löschungen außerhalb eines schmalen Fensters wurden im laufenden Betrieb
+nicht mehr propagiert, obwohl jeder Sync-Zyklus „0 errors" meldete.
+
+### Behoben
+- **`incremental_sync` ignorierte die Config.** Der 15-Minuten-Poll lief
+  hart mit `lookback=1` / `lookahead=30` Tagen statt der konfigurierten
+  `lookback_days` / `lookahead_days`. Ein in Daely geänderter Termin, der
+  älter als gestern oder weiter als 30 Tage in der Zukunft lag, wurde so nie
+  nach Google gespiegelt — bis zum nächsten Neustart (der einen `full_sync`
+  triggert). Das Fenster folgt jetzt der Config; explizite kwargs übersteuern
+  weiterhin (z. B. Tests).
+- **Healthcheck nutzte `pgrep`**, das im Slim-Image nicht installiert ist —
+  der Container war dauerhaft `unhealthy`, obwohl der Sync lief. Ersetzt
+  durch `bridge doctor` (validiert Config/DB/Tokens und erkennt einen
+  verklemmten Sync-Loop über die Staleness-Prüfung).
+
+### Hinzugefügt
+- **Periodischer `full_sync`-Scheduler-Job.** Bisher lief `full_sync` (mit
+  Store-vs-Snapshot-Löscherkennung) nur einmal beim Start; physisch gelöschte
+  Termine (ohne `deleted=true`-Flag) verschwanden erst beim nächsten Neustart
+  aus Google. Neuer Job läuft standardmäßig alle 24 h.
+- Config-Knopf `full_sync_interval_hours` (Default `24`; `0` schaltet den
+  periodischen Job ab → Legacy-Verhalten, full_sync nur beim Start).
+- Tests: Config-Fenster im incremental Poll, override via kwargs, full_sync-Job
+  geplant bzw. via `=0` abgeschaltet.
 
 ## [1.2.0] - 2026-05-14
 

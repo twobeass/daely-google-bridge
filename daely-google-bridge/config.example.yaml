@@ -61,6 +61,10 @@ color_mapping:
 poll_interval_minutes: 15
 lookback_days: 30
 lookahead_days: 365
+# Periodic full_sync (with store-vs-snapshot deletion detection) on top of the
+# incremental poll. Only full_sync removes events that vanished from Daely
+# without a `deleted=true` flag. 0 → run full_sync only once at startup.
+full_sync_interval_hours: 24
 
 
 # ─── Health-Check HTTP server ────────────────────────────────────

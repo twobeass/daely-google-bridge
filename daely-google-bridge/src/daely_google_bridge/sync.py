@@ -5,10 +5,10 @@ Two entry points:
 - `full_sync()`        scans `[today − lookback_days, today + lookahead_days]`,
                        inserts/patches/deletes, AND detects deletions by
                        diffing the snapshot against the store.
-- `incremental_sync()` scans a smaller rolling window (1 day back, 30 days
-                       forward), only acts on `deleted=true` flags from the
-                       snapshot. Long-term physical deletes are caught by
-                       a periodic `full_sync`.
+- `incremental_sync()` scans the same configured window by default, but only
+                       acts on `deleted=true` flags from the snapshot (no
+                       store-vs-snapshot diff). Long-term physical deletes are
+                       caught by a periodic `full_sync`.
 
 Both call into a shared `_run_sync()` helper.
 
@@ -456,13 +456,24 @@ def incremental_sync(
     store: Store,
     config: BridgeConfig,
     *,
-    lookback_days: int = 1,
-    lookahead_days: int = 30,
+    lookback_days: int | None = None,
+    lookahead_days: int | None = None,
 ) -> SyncReport:
-    """Short-window incremental — relies on `deleted=true` flags only.
+    """Incremental scan — relies on `deleted=true` flags only.
 
-    Long-term physical deletions are caught by the next full_sync.
+    The window defaults to the configured `lookback_days`/`lookahead_days`
+    (same as `full_sync`) so edits to events anywhere in the configured range
+    propagate on every poll — not just the next restart-triggered full_sync.
+    Pass explicit `lookback_days`/`lookahead_days` to override (e.g. tests).
+
+    Long-term physical deletions (events that vanish from the snapshot without
+    a `deleted=true` flag) are still only caught by a `full_sync`, since
+    incremental runs with `detect_missing_as_deleted=False`.
     """
+    if lookback_days is None:
+        lookback_days = config.lookback_days
+    if lookahead_days is None:
+        lookahead_days = config.lookahead_days
     today = date.today()
     return _run_sync(
         daely, google, store, config,

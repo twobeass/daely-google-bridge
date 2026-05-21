@@ -4,7 +4,7 @@ We don't touch the network. Daely returns a hand-crafted list of
 CalendarWithEvents; Google is a MagicMock whose insert/patch/delete are
 inspected.
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -298,6 +298,36 @@ def test_incremental_sync_does_not_detect_missing_as_deleted(store):
     assert report.deletes == 0
     google.delete_event.assert_not_called()
     assert store.get_event_mapping("ev-gone") is not None
+
+
+def test_incremental_sync_uses_configured_window_by_default(store):
+    """The poll window defaults to config.lookback_days/lookahead_days, not 1/30,
+    so edits anywhere in the configured range propagate on every cycle."""
+    daely = _daely_mock([_calendar_with_events(events=[])])
+    google = _google_mock()
+
+    incremental_sync(daely, google, store, _config(lookback=30, lookahead=365))
+
+    _, kwargs = daely.get_calendars_with_events.call_args
+    today = date.today()
+    assert kwargs["start_date"] == today - timedelta(days=30)
+    assert kwargs["end_date"] == today + timedelta(days=365)
+
+
+def test_incremental_sync_explicit_window_overrides_config(store):
+    """Callers (e.g. tests) can still pin the window via explicit kwargs."""
+    daely = _daely_mock([_calendar_with_events(events=[])])
+    google = _google_mock()
+
+    incremental_sync(
+        daely, google, store, _config(lookback=30, lookahead=365),
+        lookback_days=1, lookahead_days=7,
+    )
+
+    _, kwargs = daely.get_calendars_with_events.call_args
+    today = date.today()
+    assert kwargs["start_date"] == today - timedelta(days=1)
+    assert kwargs["end_date"] == today + timedelta(days=7)
 
 
 # ─────────────── master-only dedup ───────────────
