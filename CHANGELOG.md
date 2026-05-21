@@ -10,6 +10,10 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 ## [Unreleased]
 
+_(noch nichts.)_
+
+## [1.3.0] - 2026-05-21
+
 **Behebt stille Drift zwischen Daely und Google** — Änderungen und
 Löschungen außerhalb eines schmalen Fensters wurden im laufenden Betrieb
 nicht mehr propagiert, obwohl jeder Sync-Zyklus „0 errors" meldete.
