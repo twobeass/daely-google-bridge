@@ -70,7 +70,8 @@ inkl. Tests + Doku):
 
 | #     | Feature                                          | Cluster   | Wert | Kompl. | Risiko | Status   | Empfehlung    |
 |-------|--------------------------------------------------|-----------|:----:|:------:|:------:|----------|---------------|
-| 1.1   | Echtzeit-Sync via Daely-SignalR (`realtime`)     | Engine    | ★★★  | L      | 🟡     | **done v1.0.0** | —         |
+| 1.1   | Echtzeit-Sync via Daely-SignalR (`realtime`)     | Engine    | ★★★  | L      | 🟡     | **done v1.6.0** | — (funktioniert seit v1.6, default an) |
+| 1.1b  | Targeted Realtime-Sync (statt full_sync)         | Engine    | ★☆☆  | M      | 🟡     | deferred | erst bei großem Kalender |
 | 1.2   | Retry-Loop für `failed=true`-Mappings            | Engine    | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
 | 1.3   | Schema-Migrations für SQLite                     | Engine    | ★★★  | S      | 🟢     | **done v0.1.0** | —         |
 | 1.4   | Health-Check-HTTP-Endpoint                       | Engine    | ★★☆  | S      | 🟢     | **done v0.1.0** | —         |
@@ -79,7 +80,8 @@ inkl. Tests + Doku):
 | 1.7   | Quota-aware Backoff für Google                   | Engine    | ★☆☆  | S      | 🟢     | partial  | Maybe         |
 | 2.1   | Device-Code-Flow statt ROPC (MFA-Support)        | Auth      | ☆☆☆  | M      | 🟡     | obsolete | No (Daely bietet kein MFA) |
 | 2.2   | Token-Encryption-at-Rest in SQLite               | Auth      | ★☆☆  | M      | 🟢     | open     | No            |
-| 3.1   | Recurring-Instance-Deletions (EXDATE-Synthese)   | Mapping   | ★★★  | M      | 🟢     | **done v1.2.0** | — (Moved-instances noch offen) |
+| 3.1   | Recurring-Instance-Deletions (EXDATE-Synthese)   | Mapping   | ★★★  | M      | 🟢     | **done v1.2.0** (mittlere) + **v1.5.0** (letzte) | — |
+| 3.1b  | Gelöschte ERSTE Instanz (Anker-Persistenz)       | Mapping   | ★☆☆  | M      | 🔴     | doc-only | No (Risiko > Nutzen) |
 | 3.2   | Reicheres Reminder-Mapping (multi-method)        | Mapping   | ★☆☆  | S      | 🟢     | open     | Maybe         |
 | 3.3   | Daely-Participants → Google-Attendees            | Mapping   | ★☆☆  | M      | 🟡     | open     | No            |
 | 3.4   | Location-Geocoding für Maps-Links                | Mapping   | ★☆☆  | M      | 🟢     | open     | No            |
@@ -114,29 +116,54 @@ nicht empfohlen aus dargelegten Gründen.
 
 ## 1 — Sync-Engine & Reliability
 
-### 1.1 Echtzeit-Sync via Daely-SSE (`realtime`-Service)
+### 1.1 Echtzeit-Sync via Daely-SignalR — **erledigt in v1.6.0**
 
-**Was.** Daely betreibt laut Dart-AOT-Disassembly einen `realtime`-Service
-(SSE über `daely-connect.com/realtime/...`), der Events bei Änderungen
-pusht. Die Bridge könnte so Events innerhalb von Sekunden statt 15 Minuten
-spiegeln.
+> **Stand 2026-06-03:** Realtime-Push funktioniert und ist Default an.
+> Es ist **SignalR** (nicht plain SSE), und der `SetFilter` braucht die
+> **echten internen Calendar-UUIDs** (leerer Array → keine Pushes). Das
+> echte Subject ist punkt-getrennt. Vollständig in `findings/10` belegt.
+> Realtime-Notification → debounced `full_sync`. Polling bleibt Safety-Net.
 
-**Wie.** Persistente HTTP-Connection mit `text/event-stream`-Header,
-JWT-Auth-Header. Bei jedem Push-Event ein Targeted-Sync triggern (statt
-voller Cycle). Polling als Fallback bleibt.
+**Historischer Kontext (Erst-Vermutung, teils falsch):** Daely betreibt
+einen `realtime`-Service; ursprünglich als plain SSE vermutet. Die v1.1.0-
+„Same-Account-Suppression"-Hypothese war falsch — die echten Ursachen waren
+leerer `calendars`-Filter + falsches Subject-Parsing (beide v1.6.0 gefixt).
 
-**Risiken / Caveats.**
-- Schema des `realtime`-Streams ist nicht reversed — würde neuen Probe-
-  Aufwand bedeuten (~1–2h dedizierte Live-Read-Session mit Freigabe).
-- Re-Connect-Logik (idle timeouts, refresh-token-Rotation während offener
-  Stream) ist nicht-trivial. Robustheit braucht eigene Tests.
-- Reduziert Daely-Backend-Last — gute Bürger-Eigenschaft.
+---
 
-**Wert/Aufwand.** Niedrigere Sync-Latenz wäre nett, aber 15 min sind für
-einen Familienkalender meistens ausreichend. **Wert ★★☆, Komplexität L.**
+### 1.1b Targeted Realtime-Sync (statt full_sync) — **deferred**
 
-**Empfehlung.** *Maybe.* Erst nach §1.3 + §2.1 angehen. Wenn Daely irgendwann
-das Polling-Volumen drosselt, wird's plötzlich relevant.
+**Status: dokumentiert, NICHT gebaut.** Bewusste Entscheidung (2026-06-03).
+
+**Idee.** Statt bei jeder Realtime-Notification einen `full_sync` zu fahren,
+nur das geänderte Event per ID abrufen und gezielt patchen.
+
+**Drei Fallen (warum's kniffliger ist als es aussieht):**
+1. **`<masterId>.deleted` ist mehrdeutig** — Einzel-Instanz-Löschung vs.
+   ganze-Serie-Löschung feuern beide dasselbe (Probe 8). Naives
+   Targeted-Delete würde bei einer Einzel-Instanz die **ganze Serie** aus
+   Google werfen. Muss per `GET events/<id>` (200 vs 404) disambiguiert
+   werden.
+2. **Recurring braucht die volle Expansion** — das Master-Detail zeigt
+   gelöschte Instanzen nicht (siehe §3.1b / findings/10), also fällt jede
+   Serien-Änderung ohnehin auf `full_sync` zurück (für die EXDATE-Diff).
+3. **Robustheit** — der debounced `full_sync` fängt Bursts in einem Pass
+   und übersteht verpasste/gedropte SSE-Notifications; ein Targeted-Handler
+   verarbeitet einzeln und ist fragiler.
+
+**Der Knackpunkt gegen den Nutzen:** `full_sync` patcht dank No-op-Check +
+`body_fingerprint` (v1.4) **bereits nur das eine geänderte Event** zu
+Google. Targeted spart also **keine** Google-Writes, nur den Daely-Fetch +
+lokalen Diff — bei kleinem Kalender (~43 Events, full_sync ~2,7 s)
+vernachlässigbar.
+
+**Korrekte Form, falls je gebaut (Hybrid):** `GET events/<id>` →
+`404` → targeted delete; `200` + nicht-recurring → targeted insert/patch;
+`200` + recurring → `full_sync`-Fallback.
+
+**Empfehlung.** Erst lohnend bei **großem/sehr aktivem** Kalender (hunderte
+Events, viele Änderungen/min), wo der wiederholte Full-Fetch spürbar wird.
+Bis dahin: full_sync-on-trigger (korrekt, robust, minimal Writes).
 
 ---
 
@@ -344,15 +371,58 @@ Datum eine Lücke (delta 14 bzw. 21 Tage statt 7).
 - `sync._process_calendar` ruft das **vor** der Dedup auf (danach sind die
   Einzel-Instanzen weg).
 
-**Bewusst nicht behandelt** (Folge-Feature, kein Live-Bedarf beobachtet):
-- **Verschobene** Instanzen (Modified Instances mit `recurringEventId` +
-  `originalStartTime`) — würde ein zweites Event pro Override + separate
-  Store-Rows brauchen.
-- Gelöschte **erste/letzte** Instanz einer Serie — kein Nachbar zum
-  Diffen, undetektierbar. Dokumentierte Grenze.
+**Folge-Stand:**
+- Gelöschte **letzte** Instanz endlicher (`UNTIL`-) Serien → in v1.5.0
+  gelöst (fenster-gewahrte Expansion bis zum echten Serienende).
+- Gelöschte **mittlere** Instanz → seit v1.2.0 gelöst.
 
 **Aufwand real:** ~M (1 Tag), nicht L — die EXDATE-Synthese ist deutlich
 simpler als das volle Modified-Instance-Modell. 17 neue Tests.
+
+---
+
+### 3.1b Gelöschte ERSTE Instanz — nur via Anker-Persistenz lösbar
+
+**Status: dokumentierte Grenze, NICHT gebaut.** Bewusste Entscheidung
+(2026-06-03) nach gründlicher API-Untersuchung.
+
+**Warum es offen bleibt.** `compute_series_exdates` ankert die RRULE-
+Expansion an der *frühesten beobachteten* Instanz. Ist die **erste**
+gelöscht, rutscht der Anker auf die zweite → die Lücke vorne ist
+unsichtbar (kein früherer Nachbar zum Diffen).
+
+**Was wir live ausgeschlossen haben** (Probes 6–8, 2026-06-03):
+- Die Realtime-Notification trägt **nur die Master-/Serien-UUID** +
+  Aktion (`created`/`updated`/`deleted`). Eine Einzel-Instanz-Löschung
+  ist von einer ganzen-Serie-Löschung **nicht unterscheidbar** (beide
+  `event.<masterId>.deleted`). Kein Start-Zeitpunkt, keine Instanz-Info.
+- `GET /api/groups/<gid>/calendars/<calId>/events/<masterId>` liefert das
+  **pristine Master-Objekt**: volle Original-RRULE, **keine** Felder
+  `exceptions`/`exdate`/`excludedDates`/`deletedInstances`, und `updated`
+  wird bei Instanz-Löschung **nicht** hochgesetzt. Der Endpoint exponiert
+  die gelöschten Instanzen mit **keinem Byte**.
+- Damit: **kein API-Pfad** gibt die gelöschten Instanzen explizit her;
+  sie sind nur als **Lücke in der `with-events`-Expansion** sichtbar
+  (siehe `findings/10`).
+
+**Einziger gangbarer Weg:** Anker-Persistenz — beim ersten Sehen einer
+Serie die wahre früheste Instanz (`dtstart`) im Store merken; rutscht die
+früheste beobachtete später, vorne EXDATEs synthetisieren.
+
+**Warum trotzdem nicht gebaut:**
+- Schadensbild der Grenze ist **mild**: ein Geister-Termin ganz am
+  Serien-Anfang, einmal manuell in Google löschbar. Selten.
+- Risiko einer fehlerhaften Anker-Logik ist **schlimmer**: die
+  **Fenster-Alterung** (alte Instanzen fallen legitim aus `lookback_days`
+  → früheste beobachtete rutscht legitim später) könnte fälschlich
+  EXDATEs auf **echte** Instanzen setzen und sie aus Google ausblenden.
+- Risiko/Nutzen ungünstig → erst bauen, wenn's real stört.
+
+**Wenn doch gebaut:** neue Store-Spalte `series_anchor` (recurringId →
+früheste je gesehene dtstart), Front-Shift-Detection in `sync`, plus
+robuste Trennung „gelöscht" vs „aus dem Fenster gealtert" (Anker deutlich
+im Fenster + neue-früheste später → Löschung; nahe Fenstergrenze →
+Alterung, kein EXDATE).
 
 ---
 

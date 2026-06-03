@@ -387,3 +387,41 @@ Parser. Kein mitmproxy nötig; der Re-Test mit garantiert-gutem Trigger
 - `SetFilter`-Invocation **mit echten calendar-IDs** → `{"type":3,"result":null}`
 - Pings `{"type":6}` alle 15 s
 - Bei Change: `{"type":1,"target":"ReceiveNotification","arguments":[{…}]}`
+
+## Einzel-Event-Detail-Endpoint — was er (NICHT) liefert (Probe 7/8, v1.6.0)
+
+`GET /api/groups/<gid>/calendars/<calId>/events/<eventId>` — live verifiziert,
+read-only. Klärt eine zentrale Frage: **kann man über die Event-ID die
+gelöschten Serien-Instanzen erfahren?** → **Nein.**
+
+**Befund (alle UUIDs hier synthetisch):**
+- Für ein **Serien-Master** liefert der Endpoint das **unexpandierte
+  Master-Objekt** mit den normalen 17 CalendarEvent-Feldern:
+  ```json
+  {"id": "<masterUuid>", "recurringId": null,
+   "recurrence": ["RRULE:FREQ=DAILY;UNTIL=20260613T235900Z;INTERVAL=1"],
+   "deleted": false, "updated": "<creation-time>", … }
+  ```
+- **Keine** Felder `exceptions` / `exdate` / `excludedDates` /
+  `deletedInstances` / `overrides`. Die Key-Liste ist exakt das normale
+  Event-Schema.
+- **Beim Löschen einzelner Instanzen ändert sich das Master-Objekt NICHT:**
+  `recurrence` bleibt die volle Original-RRULE, `updated` wird **nicht**
+  hochgesetzt. Über mehrere Einzel-Löschungen hinweg identisch.
+- Erst beim Löschen der **ganzen** Serie → `404 {"message":"Event not found."}`.
+
+**Konsequenz.** Es gibt **keinen** API-Pfad, der gelöschte Instanzen explizit
+ausgibt:
+| Quelle | Info über gelöschte Einzel-Instanz |
+|---|---|
+| Realtime-Notification | nur Master-ID + `deleted` (Einzel-Instanz ununterscheidbar von Ganz-Serien-Löschung) |
+| `GET events/<masterId>` | pristine Master, volle RRULE — **nichts** |
+| `with-events` | lässt Instanz still aus der Expansion weg → **Lücke** (einzige Spur) |
+
+Daely wendet die Löschung server-seitig **beim Expandieren** an, legt sie aber
+nirgends als Datenfeld offen. Das Tablet rendert vermutlich einfach die
+Expansion neu (braucht nie „welche Instanz"). Unser Problem ist einzig der
+**Daely→Google-RRULE-Übergang** (Google expandiert die volle RRULE, kennt die
+Lücke nicht). Daraus folgt die dokumentierte Grenze in
+`findings/09 §3.1b`: gelöschte **erste** Instanz nur via Anker-Persistenz
+lösbar, nicht über die API.
