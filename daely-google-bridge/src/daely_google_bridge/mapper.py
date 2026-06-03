@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, datetime, time, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrulestr
 
@@ -110,9 +112,43 @@ def deduplicate_recurring(events: list[CalendarEvent]) -> list[CalendarEvent]:
 # ─────────────────── recurring-instance deletions (§3.1) ───────────────────
 
 _UNTIL_RE = re.compile(r";UNTIL=[^;]*", re.IGNORECASE)
+# Captures the UNTIL value itself (RFC 5545 forms: `…Z` UTC, or floating local).
+_UNTIL_VALUE_RE = re.compile(r"UNTIL=(\d{8}T\d{6})(Z?)", re.IGNORECASE)
 
 
-def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
+def _until_to_wall(rrule_line: str, tz_name: str | None) -> datetime | None:
+    """Parse the RRULE's UNTIL into a naive wall-clock datetime, or None.
+
+    UNTIL is normally UTC (`…Z`); we convert it into the series' local
+    timezone (the same TZID the EXDATEs carry) and drop tzinfo so it lives in
+    the same naive wall-clock space as the rest of this function. A single
+    point-in-time conversion is DST-correct (zoneinfo picks the right offset
+    for that date); we never iterate across a transition in aware time.
+    """
+    m = _UNTIL_VALUE_RE.search(rrule_line)
+    if not m:
+        return None
+    value, zulu = m.group(1), m.group(2)
+    try:
+        naive = datetime.strptime(value, "%Y%m%dT%H%M%S")
+    except ValueError:
+        return None
+    if zulu and tz_name:
+        # UTC instant → local wall-clock.
+        return (
+            naive.replace(tzinfo=timezone.utc)
+            .astimezone(ZoneInfo(tz_name))
+            .replace(tzinfo=None)
+        )
+    # Floating UNTIL, or no source tz to convert into: treat as wall-clock.
+    return naive
+
+
+def compute_series_exdates(
+    instances: list[CalendarEvent],
+    *,
+    window_end: date | None = None,
+) -> list[str]:
     """Detect instances deleted from a recurring series, return EXDATE lines.
 
     Daely expands recurring events server-side, and when the user deletes a
@@ -121,17 +157,27 @@ def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
     (confirmed via live read, see findings/06). Google therefore re-expands
     the full RRULE and the deleted occurrence stays visible.
 
-    This function takes ALL fetched instances of one series, expands the RRULE
-    over the *observed* range `[earliest, latest]`, diffs against the dates
-    Daely actually returned, and emits `EXDATE;TZID=…` lines for the gaps.
+    This function takes ALL fetched instances of one series, expands the RRULE,
+    diffs against the dates Daely actually returned, and emits `EXDATE;TZID=…`
+    lines for the gaps.
+
+    Expansion upper bound:
+      - For an **open-ended** series we can only diff up to the last returned
+        instance — past that we can't tell a deleted trailing occurrence from
+        the simple edge of the fetch window.
+      - For a series with an explicit **UNTIL** we know the real end, so we
+        expand all the way to it (capped by `window_end` so we never EXDATE
+        occurrences Daely was never asked about). This catches a deleted
+        *last* occurrence, which otherwise leaves the observed range ending
+        early and stays visible in Google.
 
     Works in naive wall-clock time so it's DST-safe — Google applies the
     TZID. Returns `[]` when there's no gap, fewer than 2 timed instances,
     or no RRULE.
 
-    Known limitation: a deleted *first* or *last* occurrence of a series is
-    undetectable — there's no surviving neighbour to diff against, so the
-    observed range simply starts/ends later. Acceptable; documented.
+    Remaining limitation: a deleted *first* occurrence is still undetectable —
+    there's no surviving earlier neighbour, so the observed range (and our
+    dtstart proxy) simply starts later.
     """
     # Only timed recurring instances — all-day recurring series would need
     # DATE-valued EXDATEs; not observed in live data, handled defensively
@@ -146,6 +192,7 @@ def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
 
     timed.sort(key=_wall)
     earliest = timed[0]
+    tz = earliest.start.timeZone
 
     rrule_lines = [
         r for r in (earliest.recurrence or [])
@@ -154,16 +201,29 @@ def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
     if not rrule_lines:
         return []
 
-    # Strip UNTIL — it's usually UTC ("…Z") and would clash with our naive
-    # dtstart inside dateutil. We bound expansion with `.between()` anyway,
-    # and `latest` never exceeds UNTIL (it's an actually-returned instance).
+    # Strip UNTIL from the rule we feed dateutil — UNTIL is usually UTC ("…Z")
+    # and would clash with our naive dtstart. We re-derive the bound below.
     rrule_clean = _UNTIL_RE.sub("", rrule_lines[0])
 
     dtstart = _wall(earliest)
     latest = _wall(timed[-1])
+
+    # Default: only diff within the observed range. We can extend past the
+    # last returned instance ONLY when we know two things: the series' real
+    # end (an explicit UNTIL) AND the fetch window (so we never expand past
+    # what Daely was queried for — within the window, "expected but absent"
+    # means deleted). With both, a deleted *last* occurrence becomes visible
+    # as a gap; without them we'd be guessing, so we stay conservative.
+    upper = latest
+    if window_end is not None:
+        until_wall = _until_to_wall(rrule_lines[0], tz)
+        if until_wall is not None:
+            upper = min(until_wall, datetime.combine(window_end, time.max))
+            upper = max(upper, latest)  # never shrink below what we saw
+
     try:
         rule = rrulestr(rrule_clean, dtstart=dtstart)
-        expected = set(rule.between(dtstart, latest, inc=True))
+        expected = set(rule.between(dtstart, upper, inc=True))
     except (ValueError, TypeError):
         # Malformed RRULE — don't guess, just emit nothing.
         return []
@@ -173,7 +233,6 @@ def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
     if not missing:
         return []
 
-    tz = earliest.start.timeZone
     exdates: list[str] = []
     for dt in missing:
         stamp = dt.strftime("%Y%m%dT%H%M%S")
@@ -185,11 +244,19 @@ def compute_series_exdates(instances: list[CalendarEvent]) -> list[str]:
     return exdates
 
 
-def exdates_by_recurring_id(events: list[CalendarEvent]) -> dict[str, list[str]]:
+def exdates_by_recurring_id(
+    events: list[CalendarEvent],
+    *,
+    window_end: date | None = None,
+) -> dict[str, list[str]]:
     """Group `events` by `recurringId` and compute EXDATEs for each series.
 
     Returns `{recurringId: [exdate_line, …]}` — only series with at least
     one detected gap appear in the dict. Non-recurring events are ignored.
+
+    `window_end` is the sync's fetch end date; it caps how far a finite
+    (UNTIL-bounded) series is expanded so we never EXDATE occurrences beyond
+    what Daely was queried for. See `compute_series_exdates`.
     """
     by_series: dict[str, list[CalendarEvent]] = {}
     for ev in events:
@@ -199,7 +266,7 @@ def exdates_by_recurring_id(events: list[CalendarEvent]) -> dict[str, list[str]]
 
     out: dict[str, list[str]] = {}
     for rid, instances in by_series.items():
-        exdates = compute_series_exdates(instances)
+        exdates = compute_series_exdates(instances, window_end=window_end)
         if exdates:
             out[rid] = exdates
     return out

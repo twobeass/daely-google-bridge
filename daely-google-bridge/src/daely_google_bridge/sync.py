@@ -301,6 +301,7 @@ def _process_calendar(
     color_overrides: dict[str, str] | None,
     fallback_google_calendar_id: str | None,
     detect_missing_as_deleted: bool,
+    window_end: date,
     report: SyncReport,
 ) -> None:
     if should_skip_calendar(cwe):
@@ -324,7 +325,7 @@ def _process_calendar(
     # §3.1: compute EXDATEs per recurring series BEFORE dedup — we need the
     # full instance list to detect occurrences Daely silently dropped. After
     # dedup we only keep the master, so the gap signal would be gone.
-    series_exdates = exdates_by_recurring_id(cwe.events)
+    series_exdates = exdates_by_recurring_id(cwe.events, window_end=window_end)
 
     deduped = deduplicate_recurring(cwe.events)
     seen_keys = {_store_key(e) for e in deduped if not e.deleted}
@@ -417,6 +418,7 @@ def _run_sync(
             color_overrides=color_overrides,
             fallback_google_calendar_id=config.fallback_google_calendar_id,
             detect_missing_as_deleted=detect_missing_as_deleted,
+            window_end=end_date,
             report=report,
         )
 

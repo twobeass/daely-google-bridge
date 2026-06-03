@@ -939,6 +939,88 @@ def test_compute_exdates_leading_deletion_undetectable():
     assert compute_series_exdates(instances) == []
 
 
+def test_compute_exdates_deleted_last_instance_caught_with_until_and_window():
+    """Regression (the live 'Musik' bug): a deleted LAST occurrence of a
+    finite (UNTIL-bounded) series. The last surviving instance is 05-28, but
+    the RRULE runs to 06-11 — so 06-04 (deleted) sits past the observed range.
+    With the series end (UNTIL) and the fetch window known, it's detectable."""
+    from datetime import date as _date
+    rid = "00000000-0000-0000-0005-0000000000ab"
+    # RRULE Thursdays until 06-11 (06-11 itself excluded by the 1-sec-early
+    # UNTIL, exactly as the live data showed). Surviving: 04-30, 05-07, 05-28.
+    rrule = "RRULE:FREQ=WEEKLY;UNTIL=20260611T134959Z;BYDAY=TH"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-{m:02d}-{d:02d}T15:50:00+02:00",
+                            rrule=rrule)
+        for (m, d) in [(4, 30), (5, 7), (5, 28)]
+    ]
+    # Without the window we stay conservative → only the interior gaps.
+    assert compute_series_exdates(instances) == [
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+    ]
+    # With the fetch window, the deleted trailing 06-04 is also caught.
+    exdates = compute_series_exdates(instances, window_end=_date(2026, 10, 1))
+    assert exdates == [
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+        "EXDATE;TZID=Europe/Berlin:20260604T155000",
+    ]
+
+
+def test_compute_exdates_window_caps_until_expansion():
+    """A finite series whose UNTIL lies BEYOND the fetch window must only be
+    diffed up to the window — never EXDATE occurrences Daely wasn't asked for."""
+    from datetime import date as _date
+    rid = "00000000-0000-0000-0005-0000000000ac"
+    # UNTIL far in the future; we only fetched through 2026-05-21.
+    rrule = "RRULE:FREQ=WEEKLY;UNTIL=20270101T000000Z;BYDAY=TH"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00",
+                            rrule=rrule)
+        for d in (7, 28)  # 05-14, 05-21 missing within window
+    ]
+    exdates = compute_series_exdates(instances, window_end=_date(2026, 5, 21))
+    # 05-28 is past window_end → not expected; only the in-window gaps appear.
+    assert exdates == [
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+    ]
+
+
+def test_compute_exdates_open_ended_series_not_extended():
+    """An open-ended series (no UNTIL) is never extended past the last
+    observed instance, even with a window — we can't tell a deleted tail from
+    the window edge for an infinite rule."""
+    from datetime import date as _date
+    rid = "00000000-0000-0000-0005-0000000000ad"
+    rrule = "RRULE:FREQ=WEEKLY;BYDAY=TH"
+    instances = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-05-{d:02d}T15:50:00+02:00",
+                            rrule=rrule)
+        for d in (7, 28)  # 05-14, 05-21 missing
+    ]
+    exdates = compute_series_exdates(instances, window_end=_date(2026, 10, 1))
+    assert exdates == [
+        "EXDATE;TZID=Europe/Berlin:20260514T155000",
+        "EXDATE;TZID=Europe/Berlin:20260521T155000",
+    ]
+
+
+def test_exdates_by_recurring_id_threads_window_end():
+    """window_end flows through the grouping helper to the per-series compute."""
+    from datetime import date as _date
+    rid = "00000000-0000-0000-0005-0000000000ae"
+    rrule = "RRULE:FREQ=WEEKLY;UNTIL=20260611T134959Z;BYDAY=TH"
+    events = [
+        _recurring_instance(recurring_id=rid, start_iso=f"2026-{m:02d}-{d:02d}T15:50:00+02:00",
+                            rrule=rrule)
+        for (m, d) in [(4, 30), (5, 7), (5, 28)]
+    ]
+    result = exdates_by_recurring_id(events, window_end=_date(2026, 10, 1))
+    assert "20260604T155000" in "".join(result[rid])
+
+
 def test_exdates_by_recurring_id_groups_and_filters():
     """exdates_by_recurring_id only returns series that actually have gaps."""
     clean_rid = "00000000-0000-0000-0005-0000000000b1"

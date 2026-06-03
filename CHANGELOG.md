@@ -12,6 +12,37 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.5.0] - 2026-06-03
+
+**Behebt: gelöschte LETZTE Instanz einer endlichen Serie blieb in Google.**
+Folgefund zu v1.4.0 — an echten Live-Daten („Musik" donnerstags) diagnostiziert.
+
+### Behoben
+- **EXDATE-Synthese erkennt jetzt eine gelöschte letzte Instanz endlicher
+  Serien.** Bisher diffte `compute_series_exdates()` die RRULE nur über den
+  *beobachteten* Bereich `[erste … letzte gelieferte Instanz]`. Eine gelöschte
+  Instanz **hinter** der letzten überlebenden (z. B. Serie läuft per `UNTIL`
+  bis 11.06., letzter gelieferter Termin ist der 28.05., gelöscht wurde der
+  04.06.) lag außerhalb dieses Bereichs → wurde nie als Lücke erkannt → Google
+  zeigte sie weiter. Neu: bei Serien mit explizitem `UNTIL` expandiert die
+  Synthese bis zum echten Serienende — **gekappt durchs Sync-Fenster**, damit
+  nie Termine außerhalb des abgefragten Bereichs fälschlich EXDATE't werden.
+  Innerhalb des Fensters gilt: RRULE-erwartet aber von Daely nicht geliefert
+  = gelöscht.
+
+### Geändert
+- `compute_series_exdates(instances, *, window_end=None)` und
+  `exdates_by_recurring_id(events, *, window_end=None)` nehmen jetzt das
+  Sync-Fenster-Ende; `_run_sync` reicht es durch. Ohne `window_end` bleibt das
+  konservative Alt-Verhalten (nur beobachteter Bereich) — offene Serien (ohne
+  `UNTIL`) werden grundsätzlich nicht über die letzte Instanz hinaus erweitert.
+- 4 neue Tests (gelöschte Last-Instance mit UNTIL+Fenster erkannt; Fenster
+  kappt UNTIL-Expansion; offene Serie nicht erweitert; window_end-Durchreichung).
+
+### Verbleibende Grenze
+- Eine gelöschte **erste** Instanz ist weiterhin nicht erkennbar (kein früherer
+  Nachbar → unbekannter `dtstart`). In der Praxis selten.
+
 ## [1.4.0] - 2026-06-03
 
 **Behebt: gelöschte Serien-Einzeltermine verschwanden nicht aus Google.**
