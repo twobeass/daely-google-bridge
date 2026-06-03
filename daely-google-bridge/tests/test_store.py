@@ -55,6 +55,17 @@ def test_event_mapping_get_missing_returns_none(store):
     assert store.get_event_mapping("nope") is None
 
 
+def test_event_mapping_body_fingerprint_roundtrips(store):
+    _put(store, body_fingerprint="deadbeef")
+    m = store.get_event_mapping("d-1")
+    assert m.body_fingerprint == "deadbeef"
+
+
+def test_event_mapping_body_fingerprint_defaults_null(store):
+    _put(store)
+    assert store.get_event_mapping("d-1").body_fingerprint is None
+
+
 def test_event_mapping_idempotent_upsert(store):
     _put(store, google_event_id="g-1", google_calendar_id="cal-x")
     _put(store, google_event_id="g-2", google_calendar_id="cal-y",

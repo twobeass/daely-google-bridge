@@ -127,12 +127,34 @@ def _migration_002_retry_and_history(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_003_body_fingerprint(conn: sqlite3.Connection) -> None:
+    """v3 — add `body_fingerprint` to event_mapping.
+
+    Stores a hash of the last Google body the bridge actually pushed. The
+    sync no-op check compares it against the freshly-rendered body, so a
+    changed body re-patches even when Daely's `event.updated` is unchanged.
+
+    Motivating bug: deleting a single instance of a recurring series makes
+    Daely silently drop it from the expansion WITHOUT bumping the master's
+    `updated`. The §3.1 EXDATE synthesis then computes the right EXDATE, but
+    the old `updated`-only no-op check discarded it → the deleted occurrence
+    stayed visible in Google. The fingerprint closes that gap.
+
+    Column is nullable; existing rows get NULL → they mismatch any rendered
+    body on the next sync and re-patch exactly once (self-healing, no manual
+    `bridge resync` needed). After that the fingerprint is populated and
+    no-ops resume normally.
+    """
+    conn.execute("ALTER TABLE event_mapping ADD COLUMN body_fingerprint TEXT")
+
+
 # Forward-only migration list. APPEND new entries here — never edit or delete
 # existing ones, since production dbs are at varying versions and rely on this
 # list as the canonical history. Each callable receives an open Connection.
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_initial),
     (2, _migration_002_retry_and_history),
+    (3, _migration_003_body_fingerprint),
 ]
 
 LATEST_SCHEMA_VERSION = _MIGRATIONS[-1][0] if _MIGRATIONS else 0
@@ -240,6 +262,7 @@ class EventMapping:
     retry_after: datetime | None = None
     retry_count: int = 0
     last_error: str | None = None
+    body_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +421,7 @@ class Store:
         retry_after: datetime | None = None,
         retry_count: int = 0,
         last_error: str | None = None,
+        body_fingerprint: str | None = None,
     ) -> None:
         """Idempotent UPSERT — overwrites all fields except daely_id.
 
@@ -415,8 +439,8 @@ class Store:
                 INSERT INTO event_mapping (
                     daely_id, daely_calendar_id, google_event_id, google_calendar_id,
                     last_seen_updated, last_synced_at, failed,
-                    retry_after, retry_count, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    retry_after, retry_count, last_error, body_fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(daely_id) DO UPDATE SET
                     daely_calendar_id   = excluded.daely_calendar_id,
                     google_event_id     = excluded.google_event_id,
@@ -426,11 +450,12 @@ class Store:
                     failed              = excluded.failed,
                     retry_after         = excluded.retry_after,
                     retry_count         = excluded.retry_count,
-                    last_error          = excluded.last_error
+                    last_error          = excluded.last_error,
+                    body_fingerprint    = excluded.body_fingerprint
                 """,
                 (daely_id, daely_calendar_id, google_event_id, google_calendar_id,
                  seen, ts, 1 if failed else 0,
-                 retry_iso, retry_count, last_error),
+                 retry_iso, retry_count, last_error, body_fingerprint),
             )
 
     def _row_to_mapping(self, row: sqlite3.Row) -> EventMapping:
@@ -445,6 +470,7 @@ class Store:
             retry_after=_parse_dt(row["retry_after"]),
             retry_count=int(row["retry_count"] or 0),
             last_error=row["last_error"],
+            body_fingerprint=row["body_fingerprint"],
         )
 
     def get_event_mapping(self, daely_id: str) -> EventMapping | None:

@@ -12,6 +12,36 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.4.0] - 2026-06-03
+
+**Behebt: gelöschte Serien-Einzeltermine verschwanden nicht aus Google.**
+Eine in Daely gelöschte einzelne Instanz einer weiterlaufenden Serie blieb
+im Google-Kalender sichtbar — obwohl jeder Sync „0 errors" meldete.
+
+### Behoben
+- **No-op-Check ignorierte Body-Änderungen ohne `updated`-Bump.** Wenn der
+  User eine einzelne Serien-Instanz löscht, lässt Daely sie lautlos aus der
+  Expansion weg, **ohne** das `updated`-Feld des Serien-Masters zu ändern.
+  Die §3.1-EXDATE-Synthese (v1.2.0) berechnete zwar korrekt die neue EXDATE,
+  aber der alte No-op-Check (`last_seen_updated == event.updated`) verwarf den
+  gerenderten Body → die EXDATE landete nie in Google → die gelöschte Instanz
+  blieb sichtbar. Das war die eigentliche Ursache hinter der „nach dem Update
+  einmal `bridge resync`"-Notiz aus v1.2.0 — sie traf aber **jede** künftige
+  Einzel-Löschung, nicht nur die Migration.
+
+### Hinzugefügt
+- **`body_fingerprint` pro Event-Mapping** (Schema v3). Die Bridge speichert
+  einen Hash des zuletzt nach Google gepushten Bodys und re-patcht, sobald
+  sich der gewünschte Body ändert — auch wenn `updated` gleich bleibt. Fängt
+  damit nicht nur gelöschte Serien-Instanzen, sondern generell jede
+  Body-Änderung ohne `updated`-Bump (z. B. Farb-/Titeländerungen).
+- **Self-healing-Migration:** bestehende Mappings haben `body_fingerprint =
+  NULL` → sie re-patchen beim ersten Sync nach dem Update genau einmal und
+  pendeln sich dann ein. **Kein manueller `bridge resync` nötig.**
+- 6 neue Tests (Re-Patch bei Body-Änderung trotz gleichem `updated`,
+  NULL-Fingerprint-Self-Heal, echter No-op mit passendem Fingerprint,
+  Store-Roundtrip + Default-NULL).
+
 ## [1.3.0] - 2026-05-21
 
 **Behebt stille Drift zwischen Daely und Google** — Änderungen und
