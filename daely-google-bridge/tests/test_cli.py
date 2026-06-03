@@ -645,6 +645,8 @@ def test_cmd_run_starts_realtime_when_enabled(tmp_path, capsys):
     fake_daely.access_token = "at"
     fake_daely.get_me.return_value = MagicMock(id="user-uuid-test")
     fake_daely.get_my_groups.return_value = [MagicMock(id="group-uuid-test")]
+    # v1.6: auto mode fetches internal calendars for the subscription
+    fake_daely.get_calendars.return_value = [MagicMock(id="cal-1", calendarType=0)]
 
     # Realtime client mock returned by factory
     realtime_mock = MagicMock()
@@ -713,13 +715,14 @@ def test_cmd_run_skips_realtime_when_disabled(tmp_path):
 
 def test_realtime_callback_only_triggers_on_calendar_events(tmp_path, capsys):
     """The on_event callback registered by _start_realtime_client should
-    schedule a sync ONLY for calendar/* subjects."""
+    schedule a sync ONLY for calendar-domain notifications."""
     args = _build_run_args(tmp_path)
 
     fake_daely = MagicMock()
     fake_daely.access_token = "at"
     fake_daely.get_me.return_value = MagicMock(id="u")
     fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
+    fake_daely.get_calendars.return_value = [MagicMock(id="cal-1", calendarType=0)]
 
     captured = {}
 
@@ -745,18 +748,19 @@ def test_realtime_callback_only_triggers_on_calendar_events(tmp_path, capsys):
 
     # Calendar event → scheduler.add_job called
     from daely_google_bridge.models import RealtimeEvent
-    on_event(RealtimeEvent(subject="calendar/event", entityId="ev-1"))
+    cal_subj = "calendar.calendar.cal-1.event.ev-1.created"
+    on_event(RealtimeEvent(subject=cal_subj))
     assert scheduler_mock.add_job.called
     # The job was scheduled with id="realtime-trigger" + replace_existing=True
     args_called = scheduler_mock.add_job.call_args
     assert args_called.kwargs.get("id") == "realtime-trigger"
     assert args_called.kwargs.get("replace_existing") is True
 
-    # Non-calendar event → no new add_job
+    # Non-calendar domains → no new add_job
     add_job_count_before = scheduler_mock.add_job.call_count
-    on_event(RealtimeEvent(subject="chore/completion"))
-    on_event(RealtimeEvent(subject="meal-plan"))
-    on_event(RealtimeEvent(subject="user"))
+    on_event(RealtimeEvent(subject="chore.chore.completion.created"))
+    on_event(RealtimeEvent(subject="meal-plan.plan.updated"))
+    on_event(RealtimeEvent(subject="user.profile.updated"))
     assert scheduler_mock.add_job.call_count == add_job_count_before
 
 
@@ -770,6 +774,7 @@ def test_realtime_trigger_runs_full_sync_not_incremental(tmp_path):
     fake_daely.access_token = "at"
     fake_daely.get_me.return_value = MagicMock(id="u")
     fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
+    fake_daely.get_calendars.return_value = [MagicMock(id="cal-1", calendarType=0)]
 
     captured_jobs = []
 
@@ -817,7 +822,8 @@ def test_realtime_trigger_runs_full_sync_not_incremental(tmp_path):
 
     # Now simulate a realtime calendar event arriving
     from daely_google_bridge.models import RealtimeEvent
-    captured_on_event["fn"](RealtimeEvent(subject="calendar/event"))
+    captured_on_event["fn"](RealtimeEvent(
+        subject="calendar.calendar.cal-1.event.ev-1.created"))
 
     # The on_event callback scheduled a job via scheduler.add_job; the LAST
     # captured job was that one
@@ -885,14 +891,16 @@ def test_realtime_internal_only_mode_pre_fetches_calendars(tmp_path):
     assert captured["factory_called"] is True
 
 
-def test_realtime_auto_mode_does_not_fetch_calendars(tmp_path):
-    """`calendar_filter_mode: auto` (default) skips the calendar pre-fetch."""
+def test_realtime_auto_mode_fetches_calendars(tmp_path):
+    """v1.6: `calendar_filter_mode: auto` (default) now FETCHES internal
+    calendars — an empty/null subscription receives no pushes (the old bug)."""
     args = _build_run_args(tmp_path)  # default mode is "auto"
 
     fake_daely = MagicMock()
     fake_daely.access_token = "at"
     fake_daely.get_me.return_value = MagicMock(id="u")
     fake_daely.get_my_groups.return_value = [MagicMock(id="g")]
+    fake_daely.get_calendars.return_value = [MagicMock(id="cal-1", calendarType=0)]
 
     def _rt_factory(cfg, daely, me, group, on_event):
         return MagicMock()
@@ -911,7 +919,7 @@ def test_realtime_auto_mode_does_not_fetch_calendars(tmp_path):
         realtime_client_factory=_rt_factory,
     )
 
-    fake_daely.get_calendars.assert_not_called()
+    fake_daely.get_calendars.assert_called_once_with("g")
 
 
 def test_realtime_calendars_filter_is_internal_only():

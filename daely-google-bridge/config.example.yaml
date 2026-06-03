@@ -79,19 +79,19 @@ health_server:
 
 
 # ─── Realtime push (SignalR over SSE) ────────────────────────────
-# Off by default. When enabled, the bridge maintains a persistent SSE
-# connection to Daely's /realtime hub and triggers a debounced incremental
-# sync within seconds of each calendar change — replacing the 15-minute
-# poll latency. Polling stays active as a safety net.
+# ON by default since v1.6.0. The bridge holds a persistent SSE connection
+# to Daely's /realtime hub and triggers a debounced sync within seconds of
+# each calendar change — instead of waiting for the 15-minute poll. Polling
+# stays active as a safety net. Set enabled: false to poll only.
 #
-# `calendar_filter_mode`:
-#   "auto"           → don't whitelist; subscribe per the boolean toggles
-#                      (mirrors the Dart-app default; recommended)
-#   "internal-only"  → fetch and whitelist the user's internal calendars
-#                      (calendarType=0)
+# `calendar_filter_mode` — the `calendars` list MUST hold real internal
+# calendar UUIDs; an empty/null list subscribes to NOTHING (no pushes):
+#   "auto"           → fetch the group's internal calendars and subscribe
+#                      to their UUIDs (recommended, the default)
+#   "internal-only"  → alias of "auto"
 #   "explicit"       → use `calendar_uuids` below verbatim
 realtime:
-  enabled: false
+  enabled: true
   debounce_seconds: 2.0
   subscribe_user_calendars: true
   subscribe_group_calendars: true

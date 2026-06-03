@@ -513,10 +513,10 @@ def _start_realtime_client(
     Returns the started client (or None if construction failed). Errors here
     don't kill the daemon — the polling loop is still running.
     """
-    # We need user_id + group_id for the SetFilter payload.
-    # The `calendars` whitelist behaviour depends on cfg.realtime.calendar_filter_mode:
-    #   - auto: send `None` (Dart-default, JSON null)
-    #   - internal-only: pre-fetch the user's internal calendars and pass UUIDs
+    # We need user_id + group_id for the SetFilter payload, and the `calendars`
+    # list MUST hold real internal calendar UUIDs — an empty/null list
+    # subscribes to nothing (the v1.0–v1.5 realtime bug, fixed in v1.6).
+    #   - auto / internal-only: fetch the group's internal calendars, use UUIDs
     #   - explicit: use cfg.realtime.calendar_uuids verbatim
     try:
         me = daely.get_me()
@@ -525,22 +525,23 @@ def _start_realtime_client(
             raise RuntimeError("no Daely groups; can't subscribe")
         group = groups[0]
         mode = cfg.realtime.calendar_filter_mode
-        calendar_uuids: list[str] | None
-        if mode == "auto":
-            calendar_uuids = None
-        elif mode == "internal-only":
+        if mode == "explicit":
+            calendar_uuids = list(cfg.realtime.calendar_uuids)
+        else:  # "auto" or "internal-only" — both fetch internal calendar IDs
             all_cals = daely.get_calendars(group.id)
             calendar_uuids = [c.id for c in all_cals if c.calendarType == 0]
-        elif mode == "explicit":
-            calendar_uuids = list(cfg.realtime.calendar_uuids)
-        else:
-            calendar_uuids = None  # defensive
+        if not calendar_uuids:
+            log.warning(
+                "run.realtime_no_calendars",
+                msg="no calendar UUIDs to subscribe — realtime will receive "
+                    "no pushes; check calendar_filter_mode / calendar_uuids",
+            )
         log.info(
             "run.realtime_resolved_subscription",
             user_id=me.id[:8] + "…",
             group_id=group.id[:8] + "…",
             calendar_filter_mode=mode,
-            calendar_count=(len(calendar_uuids) if calendar_uuids is not None else None),
+            calendar_count=len(calendar_uuids),
         )
     except Exception as e:
         log.warning("run.realtime_disabled_fetch_failed", err=repr(e))
@@ -551,8 +552,8 @@ def _start_realtime_client(
     debounce = cfg.realtime.debounce_seconds
 
     def _on_event(event: RealtimeEvent) -> None:
-        # We only act on calendar topics; everything else is dropped (logged
-        # by the realtime client at debug level for first-of-its-subject).
+        # We only act on calendar-domain notifications; chores/checklists/etc.
+        # are dropped (logged once-per-kind by the realtime client).
         if not event.is_calendar_event:
             return
         try:
@@ -567,13 +568,13 @@ def _start_realtime_client(
             )
             log.info(
                 "run.realtime_trigger_scheduled",
-                subject=event.subject,
-                entity_id=event.entityId,
+                action=event.action,
+                event_id=event.event_id,
                 debounce_seconds=debounce,
             )
         except Exception:
             log.exception("run.realtime_trigger_failed",
-                          subject=event.subject)
+                          event_id=event.event_id)
 
     if factory is not None:
         client = factory(cfg, daely, me, group, _on_event)

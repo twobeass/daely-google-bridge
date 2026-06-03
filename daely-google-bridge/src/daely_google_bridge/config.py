@@ -68,22 +68,25 @@ class RealtimeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    enabled: bool = False
+    # On by default since v1.6.0 — realtime push is proven working (calendar
+    # changes propagate within seconds). Polling stays active as a safety net.
+    enabled: bool = True
     # Debounce window: multiple events arriving in quick succession coalesce
-    # into a single incremental_sync. Default 2s — short enough to feel
-    # immediate, long enough to absorb a burst of related changes.
+    # into a single sync. Default 2s — short enough to feel immediate, long
+    # enough to absorb a burst of related changes.
     debounce_seconds: float = Field(default=2.0, ge=0.0, le=60.0)
     # Topic toggles — usually only calendars are relevant for the bridge.
     subscribe_user_calendars: bool = True
     subscribe_group_calendars: bool = True
     subscribe_chores: bool = False
     subscribe_checklists: bool = False
-    # `calendars` whitelist behaviour:
-    #   "auto"          → send `null` in JSON (no whitelist; subscribe per
-    #                     subscribe_user_calendars + subscribe_group_calendars
-    #                     booleans). Mirrors the Dart-app default.
-    #   "internal-only" → fetch the user's internal calendars at startup and
-    #                     pass the UUIDs as a whitelist.
+    # `calendars` whitelist behaviour. CRITICAL: an empty/null `calendars`
+    # list means the server subscribes us to NOTHING — no pushes arrive
+    # (this was the v1.0–v1.5 realtime bug). The list MUST contain real
+    # internal calendar UUIDs.
+    #   "auto"          → fetch the group's internal calendars at startup and
+    #                     subscribe to their UUIDs (recommended, the default).
+    #   "internal-only" → alias of "auto" (kept for back-compat).
     #   "explicit"      → use the `calendar_uuids` list below verbatim.
     calendar_filter_mode: Literal["auto", "internal-only", "explicit"] = "auto"
     calendar_uuids: list[str] = Field(default_factory=list)

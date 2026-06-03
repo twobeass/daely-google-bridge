@@ -182,32 +182,66 @@ def test_filter_calendars_propagates_user_value():
 # ─────────────────── RealtimeEvent model ───────────────────
 
 
-def test_realtime_event_main_topic_extracts_first_segment():
-    e = RealtimeEvent(subject="calendar/event")
-    assert e.main_topic == "calendar"
+# Real wire subject format (validated live 2026-06-03), synthetic UUIDs:
+_CAL = "00000000-0000-0000-0000-0000000000c1"
+_EV = "00000000-0000-0000-0000-0000000000e1"
+_SUBJ_CREATED = f"calendar.calendar.{_CAL}.event.{_EV}.created"
+
+
+def test_realtime_event_domain_extracts_first_dotted_segment():
+    e = RealtimeEvent(subject=_SUBJ_CREATED)
+    assert e.domain == "calendar"
     assert e.is_calendar_event is True
 
 
-def test_realtime_event_no_subject_returns_empty_main_topic():
+def test_realtime_event_parses_action_and_ids():
+    e = RealtimeEvent(subject=_SUBJ_CREATED)
+    assert e.action == "created"
+    assert e.event_id == _EV
+    assert e.calendar_id == _CAL
+
+
+def test_realtime_event_updated_and_deleted_actions():
+    upd = RealtimeEvent(subject=f"calendar.calendar.{_CAL}.event.{_EV}.updated")
+    deleted = RealtimeEvent(subject=f"calendar.calendar.{_CAL}.event.{_EV}.deleted")
+    assert upd.action == "updated"
+    assert deleted.action == "deleted"
+
+
+def test_realtime_event_no_subject_is_empty_domain():
     e = RealtimeEvent()
-    assert e.main_topic == ""
+    assert e.domain == ""
     assert e.is_calendar_event is False
+    assert e.action is None
+    assert e.event_id is None
 
 
 def test_realtime_event_chore_is_not_calendar_event():
-    e = RealtimeEvent(subject="chore/completion")
-    assert e.main_topic == "chore"
+    e = RealtimeEvent(subject="chore.chore.completion.created")
+    assert e.domain == "chore"
     assert e.is_calendar_event is False
+
+
+def test_realtime_event_calendar_level_change_still_counts():
+    """A calendar-domain notification without an `.event.` segment (e.g. a
+    calendar-level change) still triggers a sync."""
+    e = RealtimeEvent(subject=f"calendar.calendar.{_CAL}.updated")
+    assert e.is_calendar_event is True
+    assert e.event_id is None  # no event segment
+    assert e.action == "updated"
 
 
 def test_realtime_event_tolerates_extra_fields():
     e = RealtimeEvent.model_validate({
-        "subject": "calendar/event",
-        "topic": "x", "entityId": "y", "topicKind": "z", "topicKindId": "w",
+        "resourceType": "Calendar",
+        "subject": _SUBJ_CREATED,
+        "time": "2026-06-03T07:18:19.9431427+00:00",
         "futureField": "if-server-adds-this-we-shouldnt-break",
         "anotherFuture": [1, 2, 3],
     })
-    assert e.subject == "calendar/event"
+    assert e.subject == _SUBJ_CREATED
+    assert e.resourceType == "Calendar"
+    assert e.time.startswith("2026-06-03")
 
 
 # ─────────────────── full-session integration (mocked) ───────────────────
@@ -252,11 +286,9 @@ def test_session_handshake_then_setfilter_then_notification(captured_events):
             "type": 1,
             "target": "ReceiveNotification",
             "arguments": [{
-                "subject": "calendar/event",
-                "topic": "calendar",
-                "entityId": "ev-uuid",
-                "topicKind": "Calendar",
-                "topicKindId": "cal-uuid",
+                "resourceType": "Calendar",
+                "subject": _SUBJ_CREATED,
+                "time": "2026-06-03T07:18:19.94+00:00",
             }],
         }),
         _frame({"type": 7, "error": None}),  # close from server
@@ -271,8 +303,9 @@ def test_session_handshake_then_setfilter_then_notification(captured_events):
 
     assert len(captured_events) == 1
     e = captured_events[0]
-    assert e.subject == "calendar/event"
-    assert e.entityId == "ev-uuid"
+    assert e.subject == _SUBJ_CREATED
+    assert e.event_id == _EV
+    assert e.action == "created"
     assert e.is_calendar_event is True
 
     # Verify the POSTs that happened: 1 negotiate + 1 handshake + 1 SetFilter
@@ -323,7 +356,8 @@ def test_non_calendar_event_passes_to_callback_too(captured_events):
         _frame({"type": 3, "invocationId": "1", "result": None}),
         _frame({
             "type": 1, "target": "ReceiveNotification",
-            "arguments": [{"subject": "chore/completion"}],
+            "arguments": [{"resourceType": "Chore",
+                           "subject": "chore.chore.completion.created"}],
         }),
         _frame({"type": 7, "error": None}),
     ]
@@ -335,7 +369,7 @@ def test_non_calendar_event_passes_to_callback_too(captured_events):
     client.stop(timeout=2.0)
     assert len(captured_events) == 1
     assert captured_events[0].is_calendar_event is False
-    assert captured_events[0].main_topic == "chore"
+    assert captured_events[0].domain == "chore"
 
 
 def test_unknown_invoke_target_is_ignored_gracefully(captured_events):
@@ -371,9 +405,9 @@ def test_callback_exception_does_not_kill_client(captured_events):
             _frame({}),
             _frame({"type": 3, "invocationId": "1", "result": None}),
             _frame({"type": 1, "target": "ReceiveNotification",
-                    "arguments": [{"subject": "calendar/event"}]}),
+                    "arguments": [{"subject": _SUBJ_CREATED}]}),
             _frame({"type": 1, "target": "ReceiveNotification",
-                    "arguments": [{"subject": "calendar/event"}]}),
+                    "arguments": [{"subject": _SUBJ_CREATED}]}),
             _frame({"type": 7, "error": None}),
         ],
     )

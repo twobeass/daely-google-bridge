@@ -177,37 +177,69 @@ class CalendarWithEvents(Calendar):
 class RealtimeEvent(_DaelyModel):
     """One push notification from Daely's `/realtime` SignalR hub.
 
-    Schema reverse-engineered from the Dart `_$RealtimeEventImpl.toString`
-    pattern; see `findings/10_REALTIME_API.md`. All fields are optional
-    because we haven't observed a real ReceiveNotification at probe time
-    and the precise wire shape will need runtime validation.
+    Wire format validated against a live `ReceiveNotification` (2026-06-03,
+    see findings/10_REALTIME_API.md):
 
-    `extra="ignore"` (inherited from _DaelyModel) lets us tolerate any
-    additional fields without breaking — caller can dig into `raw` if
-    a future field becomes interesting.
+        {"resourceType": "Calendar",
+         "subject": "calendar.calendar.<calendarId>.event.<eventId>.<action>",
+         "time": "<iso8601>"}
+
+    `subject` is a **dot-delimited** hierarchical path (NOT slash-delimited —
+    the original static-RE guess was wrong). For a calendar event it has the
+    shape `calendar.calendar.<calendarId>.event.<eventId>.<action>` where
+    `<action>` is created | updated | deleted. UUIDs contain hyphens, never
+    dots, so splitting on "." is safe.
+
+    `time` is kept as a raw string — we never compute on it, and Daely emits
+    7-digit fractional seconds which isn't worth a datetime round-trip.
+    `extra="ignore"` tolerates any additional server fields.
     """
+    resourceType: str | None = None
     subject: str | None = None
-    topic: str | None = None
-    entityId: str | None = None
-    topicKind: str | None = None
-    topicKindId: str | None = None
+    time: str | None = None
 
     @property
-    def main_topic(self) -> str:
-        """Top-level topic from subject — first segment before `/`.
+    def _segments(self) -> list[str]:
+        return self.subject.split(".") if self.subject else []
 
-        Subjects we know exist (per RE):
-          calendar/event, group, user, administration/setup, chore/completion,
-          checklist/item, meal-plan
-        """
-        if not self.subject:
-            return ""
-        return self.subject.split("/", 1)[0]
+    @property
+    def domain(self) -> str:
+        """Top-level domain of the subject: `calendar`, `chore`, `checklist`,
+        `group`, `user`, `administration`, `meal-plan`. Empty if no subject."""
+        segs = self._segments
+        return segs[0] if segs else ""
 
     @property
     def is_calendar_event(self) -> bool:
-        """True if this notification concerns a calendar event change."""
-        return self.main_topic == "calendar"
+        """True for any calendar-domain notification (event create/update/delete
+        or a calendar-level change). Drives whether the bridge triggers a sync."""
+        return self.domain == "calendar"
+
+    @property
+    def action(self) -> str | None:
+        """Trailing action verb (`created` | `updated` | `deleted`), or None."""
+        segs = self._segments
+        if segs and segs[-1] in ("created", "updated", "deleted"):
+            return segs[-1]
+        return None
+
+    @property
+    def event_id(self) -> str | None:
+        """The event UUID, if the subject references one (`…event.<id>…`)."""
+        segs = self._segments
+        if "event" in segs:
+            i = segs.index("event")
+            if i + 1 < len(segs):
+                return segs[i + 1]
+        return None
+
+    @property
+    def calendar_id(self) -> str | None:
+        """The calendar UUID, if present (`calendar.calendar.<id>…`)."""
+        segs = self._segments
+        if len(segs) >= 3 and segs[0] == "calendar" and segs[1] == "calendar":
+            return segs[2]
+        return None
 
 
 # ─────────────────── handy helpers ───────────────────

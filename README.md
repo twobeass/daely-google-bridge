@@ -345,66 +345,47 @@ in `bridge.db`. Beim nächsten Sync-Cycle sieht die Bridge die Events als
 > kann das gleiche per direktem CLI-Aufruf passieren:
 > `docker compose run --rm bridge bridge re-color`.
 
-### Realtime-Push (experimentell — siehe Caveat)
+### Realtime-Push (seit v1.6.0 — funktioniert, default an)
 
-Die Bridge enthält einen voll implementierten **SignalR-Realtime-Client**
-für Daelys `/realtime`-Hub (Reverse-Engineered aus dem Dart-AOT, dokumentiert
-in `findings/10_REALTIME_API.md`). Idee: statt alle 15 Minuten polln,
-hört die Bridge per persistenter SSE-Connection auf Push-Notifications
-und triggert bei jedem Calendar-Edit einen sofortigen Sync.
+Die Bridge hört per persistenter SignalR-/SSE-Connection auf Daelys
+`/realtime`-Hub und triggert bei jeder Calendar-Änderung **innerhalb von
+Sekunden** einen Sync — statt aufs 15-Minuten-Polling zu warten. Polling
+läuft parallel als Safety-Net weiter.
 
-> **⚠️ Caveat (Stand v1.1.0):** Im Live-Test gegen einen Single-Daely-
-> Account-Setup hat die Bridge in keiner Test-Session jemals eine echte
-> `ReceiveNotification` vom Server empfangen — selbst nicht, wenn Tablet-
-> Edits gemacht wurden. Connection, Handshake, SetFilter und Heartbeat-
-> Pings funktionieren alle einwandfrei (`completion: null` = Server hat
-> Filter akzeptiert). Vermutete Ursache: **Daelys Server fired Realtime-
-> Notifications nicht zurück an weitere Connections desselben User-
-> Accounts** ("du hast den Edit gemacht — du weißt das schon"). Tests
-> mit zweitem Daely-Account stehen aus, mitmproxy-Wire-Inspektion
-> ebenfalls.
->
-> Heißt konkret: in einem Familien-Setup mit nur **einem** Daely-Login
-> bringt Realtime-Push wahrscheinlich nichts, weil der Server für
-> Self-Edits keine Notifications fired. Polling alle 15 Minuten reicht
-> für den Use-Case "Tablet → Google-Calendar-Widget" voll aus.
->
-> **Default: aus.** Aktivieren nur wenn du den Server-Behavior testen
-> oder dokumentieren willst. Bei einem Familien-Setup mit zwei oder mehr
-> echten Daely-Accounts könnte's klappen — wenn ja, schreib bitte ein
-> Issue, dann härte ich das Feature.
-
-Aktivieren (auf eigene Verantwortung):
+**Default: an.** Du musst nichts tun. Beim Start holt sich die Bridge
+automatisch die internen Calendar-UUIDs deiner Gruppe und abonniert sie.
 
 ```yaml
+# Default — so ist es ohne Zutun. Nur hier, falls du was ändern willst:
 realtime:
-  enabled: true
-  debounce_seconds: 2.0
+  enabled: true            # auf false setzen, um nur zu polln
+  debounce_seconds: 2.0    # Event-Bursts zu einem Sync bündeln
+  calendar_filter_mode: auto   # auto = interne Kalender automatisch abonnieren
 ```
 
-Bridge danach neu starten. Logs zeigen den Connection-Aufbau:
+Logs beim Start + bei einer Änderung:
 
 ```
-realtime.start
 realtime.negotiate_ok
 realtime.handshake_ok
-realtime.set_filter_sent filter={...}
-realtime.completion_ok          # Server hat Filter akzeptiert
-realtime.ping pings_total=1     # alle ~60s ein Lebenszeichen
+realtime.set_filter_sent filter={... calendars: [<uuid>] ...}
+realtime.completion_ok
+realtime.ping                         # alle ~60s ein Lebenszeichen
+# ... Termin am Handy/Tablet angelegt ...
+realtime.first_event_for_kind kind=calendar.created
+run.realtime_trigger_scheduled action=created event_id=…
+sync.done inserts=1 ...
 ```
 
-Wenn jemals ein echter Push kommt, würde das so aussehen:
-```
-realtime.first_event_for_subject subject=calendar/event raw={...}
-run.realtime_trigger_scheduled debounce_seconds=2.0
-sync.start ... sync.done patches=1 ...
-```
-
-Polling läuft sowieso parallel — wenn Realtime nicht fired, übernimmt's
-nach spätestens 15 Min der Polling-Cycle. Du verlierst also nichts.
+> **Hintergrund:** Bis v1.5 war Realtime als „experimentell" markiert, weil
+> die Bridge nie Notifications empfing. Ursache (v1.6 gefixt): der
+> `SetFilter` braucht die **echten internen Calendar-UUIDs** — ein leerer
+> Array abonniert nichts. Details in `findings/10_REALTIME_API.md`.
 
 Keine zusätzlichen Ports nötig — die Verbindung ist outbound vom Bridge-
-Container zu `daely-connect.com`.
+Container zu `daely-connect.com`. Wenn die Realtime-Connection mal abreißt,
+reconnectet sie mit Backoff; was dazwischen passiert, fängt der
+Polling-Cycle ohnehin auf.
 
 ### Optional: Health-Endpoint aktivieren
 
@@ -537,9 +518,9 @@ committen.
 
 ## Status
 
-**v1.2.0 — Stable.** Feature-complete für den primären Use-Case (Polling-
-basierter Sync). Realtime-Push ist als experimentelle Erweiterung enthalten,
-aber im Single-Account-Test nie produktiv geworden — Details unten.
+**v1.6.0 — Stable.** Feature-complete für den primären Use-Case (Polling-
+basierter Sync) plus Realtime-Push (seit v1.6.0 standardmäßig aktiv —
+Calendar-Änderungen propagieren in Sekunden). Details unten.
 
 | Phase | Status | Inhalt |
 |---|---|---|
@@ -555,4 +536,4 @@ aber im Single-Account-Test nie produktiv geworden — Details unten.
 | Health | ✅ | `/healthz` + `/readyz` + `/status` HTTP-Endpoints |
 | CI/CD | ✅ | GitHub Action für Tests + Release-Workflow auf `v*`-Tags |
 | Image | ✅ | Multi-Arch Dockerfile + Compose + ghcr.io-Publishing |
-| Realtime | ⚗️ | SignalR-Push, voll implementiert + getestet — aber Server-Push ist im Single-Account-Setup nicht beobachtet (siehe README-Caveat) |
+| Realtime | ✅ | SignalR-Push, default an (v1.6.0) — Calendar-Änderungen propagieren in Sekunden |

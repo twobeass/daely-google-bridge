@@ -12,6 +12,54 @@ zu `:latest`). Wer pinnen will, kann auf einen konkreten Release-Tag fixieren.
 
 _(noch nichts.)_
 
+## [1.6.0] - 2026-06-03
+
+**Realtime-Push funktioniert — und ist jetzt Default.** Calendar-Änderungen
+propagieren in Sekunden statt erst beim 15-Minuten-Poll. Das räumt die seit
+v1.1.0 als „experimentell/tot" markierte SignalR-Integration endgültig auf:
+sie war nie strukturell unmöglich, wir haben nur zwei Bugs übersehen.
+
+### Behoben — zwei Ursachen, live diagnostiziert (2026-06-03)
+- **`calendars: null`/`[]` heißt „subscribe zu KEINEN Kalendern".** Der
+  SignalR-`SetFilter` wurde zwar immer mit `result:null` (Erfolg) bestätigt,
+  aber ein leerer `calendars`-Array registriert die Connection für **nichts**
+  — daher kamen in v1.0–v1.5 nie Notifications. Mit den **echten internen
+  Calendar-UUIDs** im Filter kommen Pushes sofort (live verifiziert: Termin
+  am Handy angelegt → Notification in ~1 s auf der Bridge-Connection).
+  Die alte „Same-Account-Suppression"-Hypothese aus v1.1.0 war **falsch**.
+- **Subject-Parsing war auf das falsche Format.** Das echte
+  `ReceiveNotification`-Payload ist `{"resourceType": "Calendar", "subject":
+  "calendar.calendar.<calId>.event.<evId>.<action>", "time": …}` — ein
+  **punkt**-getrennter Pfad, nicht `calendar/event` mit Slash (so hatte's die
+  statische RE vermutet). `is_calendar_event` hätte den echten Push verworfen,
+  selbst wenn er angekommen wäre. Beides jetzt korrekt.
+
+### Geändert
+- **`realtime.enabled` Default `true`** (war `false`). Polling bleibt parallel
+  als Safety-Net. Wer Realtime nicht will: `realtime.enabled: false`.
+- **`calendar_filter_mode: auto`** (Default) holt jetzt automatisch die
+  internen Calendar-UUIDs der Gruppe und subscribed darauf. Der alte
+  `null`-Pfad (der nichts empfing) ist entfernt. `internal-only` ist ein
+  Alias von `auto`; `explicit` nutzt `calendar_uuids` verbatim.
+- `RealtimeEvent`-Modell auf das echte Wire-Format umgeschrieben:
+  `resourceType`, dotted `subject`, `time`, plus Properties `domain`,
+  `is_calendar_event`, `action` (created/updated/deleted), `event_id`,
+  `calendar_id`. Die spekulativen Felder `topic`/`entityId`/`topicKind`/
+  `topicKindId` (nie real) sind raus.
+- Realtime-Client logt die volle Payload jetzt einmal pro `(domain, action)`
+  statt pro Subject (das echte Subject enthält die Event-UUID, wäre also
+  immer eindeutig).
+
+### Hinzugefügt
+- Realtime-Trigger nutzt `full_sync` (Deletion-Detection) — ein Push für ein
+  gelöschtes Event propagiert die Löschung sofort. Debounce (Default 2 s)
+  bündelt Event-Bursts zu einem Sync.
+
+### Doku
+- `findings/10_REALTIME_API.md` auf das verifizierte echte Protokoll
+  aktualisiert (Subject-Format, calendars-Pflicht, Wire-Beispiel).
+- README: Realtime-Abschnitt von „experimentell" auf „funktioniert, default an".
+
 ## [1.5.0] - 2026-06-03
 
 **Behebt: gelöschte LETZTE Instanz einer endlichen Serie blieb in Google.**
@@ -436,7 +484,11 @@ Sync-History, CLI-Commands, Health-Endpoint, CI).
 - **Photo-Upload** — ursprüngliches Mission-Ziel, zurückgestellt; Widget-
   Use-Case (das eigentliche Pain-Point) ist gelöst.
 
-[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/twobeass/daely-google-bridge/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.6.0
+[1.5.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.5.0
+[1.4.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.4.0
+[1.3.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.3.0
 [1.2.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.2.0
 [1.1.0]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.1.0
 [1.0.3]: https://github.com/twobeass/daely-google-bridge/releases/tag/v1.0.3

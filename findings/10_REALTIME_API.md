@@ -1,13 +1,21 @@
 # 10 – Realtime-API (`/realtime`-Endpoint)
 
-> **Stand 2026-05-08, post-v1.1.0:** Statische Rekonstruktion ist
-> vollständig; Live-Probes haben Connection + Handshake + SetFilter
-> validiert. **Aber:** trotz akzeptiertem Filter wurde in keinem Test
-> jemals ein echtes `ReceiveNotification`-Event vom Server empfangen
-> (siehe Abschnitt "Open: Why no notifications?" am Ende). Hypothese:
-> Daelys Server fired keine Push-Events zurück an weitere Connections
-> desselben User-Accounts. Tests mit zweitem Account und mitmproxy-Wire-
-> Inspektion stehen aus.
+> **Stand 2026-06-03, GELÖST (v1.6.0):** Realtime-Push funktioniert. Die
+> SignalR-Integration empfängt `ReceiveNotification`-Events live (Termin am
+> Handy angelegt → Notification in ~1 s auf der Bridge-Connection).
+>
+> Zwei Bugs hatten es in v1.0–v1.5 blockiert, **beide live diagnostiziert**:
+> 1. **`calendars: null`/`[]` = „subscribe zu KEINEN Kalendern".** Der
+>    `SetFilter` braucht die **echten internen Calendar-UUIDs**. Leerer
+>    Array → Connection für nichts registriert → keine Pushes (obwohl
+>    `SetFilter` mit `result:null`/Erfolg bestätigt wird).
+> 2. **Subject-Format ist punkt-getrennt**, nicht slash-getrennt — der
+>    Parser hätte echte Events verworfen.
+>
+> Die v1.1.0-Hypothese „Same-Account-Suppression" war **falsch** (widerlegt
+> u. a. dadurch, dass Handy↔Tablet desselben Accounts sich gegenseitig per
+> Push sehen). Kein mitmproxy nötig — der Re-Test mit garantiert-gutem
+> Trigger (Handy-Anlegen) + echten Calendar-IDs hat's geklärt.
 
 ## TL;DR
 
@@ -76,43 +84,42 @@ JSON-Felder entdeckt aus `_$$RealtimeFilterImplToJson` in
   `subscribeGroupCalendars=true`, Rest auf `false`. Wir wollen nur
   Calendar-Events.
 
-### `RealtimeEvent` (Server → Client)
+### `RealtimeEvent` (Server → Client) — ECHTES Wire-Format (live verifiziert)
 
-`toString` liefert:
-
-```
-RealtimeEvent(subject: <s>, topic: <t>, entityId: <e>, topicKind: <tk>, topicKindId: <tki>, ...)
-```
-
-Konkrete JSON-Struktur (aus dem Notification-Handler, der das Map nach
-`subject`-String routet):
+Ein live empfangenes `ReceiveNotification`-Argument (UUIDs hier synthetisch):
 
 ```json
 {
-  "resourceType": "Calendar" | "Event" | "Chore" | "Checklist" | "Group" | "User",
-  "subject":      "calendar/event" | "chore/completion" | "user" | "group" | "administration/setup" | …,
-  "topic":        "<string>",
-  "entityId":     "<uuid>",
-  "topicKind":    "<string>",
-  "topicKindId":  "<uuid>",
-  …
+  "resourceType": "Calendar",
+  "subject": "calendar.calendar.<calendarUuid>.event.<eventUuid>.created",
+  "time": "2026-06-03T07:18:19.9431427+00:00"
 }
 ```
 
-**Subject-Schema** (aus den observed Strings):
+**Wichtig — das statische `toString`-Schema war irreführend.** Das echte
+Payload hat **nur** `resourceType`, `subject`, `time`. Die im
+Dart-`toString` sichtbaren Felder `topic`/`entityId`/`topicKind`/`topicKindId`
+tauchen im Wire-Payload **nicht** auf (vermutlich interne Struktur nach
+dem Parsing, nicht das Transport-Format).
 
-| Top-Topic        | Sub-Topics (gesehen)                                |
-|------------------|------------------------------------------------------|
-| `calendar`       | `event`                                              |
-| `group`          | (no sub identified)                                  |
-| `user`           | (no sub identified)                                  |
-| `administration` | `setup_code`, `setup`, `profile`, `invite_code`     |
-| `chore`          | `completion`                                         |
-| `checklist`      | `item`                                               |
-| `meal-plan`      | (no sub identified)                                  |
+**Subject ist PUNKT-getrennt** (nicht `/`):
 
-Subject-Format ist `topic/sub` mit `/` als Trenner. Unbekannte Sub-Strings
-loggt der Client mit `Unknown <topic> subtype: ...`.
+```
+calendar . calendar . <calendarUuid> . event . <eventUuid> . <action>
+   │          │            │            │          │           │
+ domain   resource       cal-id      resource   event-id   created|
+                                                           updated|deleted
+```
+
+- UUIDs enthalten Bindestriche, nie Punkte → `split(".")` ist sicher.
+- `domain` (erstes Segment) bestimmt das Routing: `calendar`, `chore`,
+  `checklist`, `group`, `user`, `administration`, `meal-plan`.
+- `<action>` (letztes Segment): `created` | `updated` | `deleted`.
+- Calendar-Events: `event_id` = Segment nach `event`, `calendar_id` =
+  Segment nach dem zweiten `calendar`.
+
+Die Bridge (`RealtimeEvent` in `models.py`) parst genau das: `domain`,
+`is_calendar_event`, `action`, `event_id`, `calendar_id`.
 
 ## Verbindungs-Lebenszyklus (RealtimeService)
 
@@ -326,64 +333,57 @@ Calendars-Topics greifen". Akzeptiert ohne Fehler.
   werden toleriert, falls Server mehr/andere Felder schickt
 - `RealtimeClient` loggt das **erste** ReceiveNotification jedes Subjects
   vollständig (raw JSON) für die initiale Validation
-- Routing-Logik: `subject.startswith("calendar/")` → Trigger
-  Targeted-Sync. Alles andere wird gedroppt + geloggt.
+- Routing-Logik: `event.is_calendar_event` (domain == `calendar`) → Trigger
+  Sync. Alles andere wird gedroppt + geloggt.
 - Polling bleibt aktiv als Safety-Net.
 
-## Open: Why no notifications? (post-v1.1.0)
+## Gelöst: warum kamen vorher keine Notifications? (v1.6.0)
 
-In allen vier Test-Iterationen (Probe 2, 2b, 2c, 2d und v1.0.0–v1.0.3
-im laufenden Container) wurden **null** `ReceiveNotification`-Events
-empfangen, obwohl in einigen Sessions Tablet-Edits gemacht wurden.
+In v1.0–v1.5 kam **null** `ReceiveNotification`, obwohl Connection, Handshake,
+`SetFilter`-Completion und Pings alle sauber liefen. Zwei Ursachen, beide am
+2026-06-03 live diagnostiziert:
 
-Was definitiv funktioniert:
-- HTTP `POST /realtime/negotiate` → 200 mit standard SignalR-Response
-- `GET /realtime?id=...` → 200 + `text/event-stream` Antwort
-- Handshake (`{"protocol":"json","version":1}`) → Server schickt `{}` zurück
-- `SetFilter`-Invocation → Server schickt `{"type":3,"result":null}` (= success)
-- Heartbeat-Pings (`{"type":6}`) alle 15s
+### Ursache 1 — leerer `calendars`-Array = keine Subscription
 
-Was nicht beobachtet wurde:
-- `{"type":1,"target":"ReceiveNotification","arguments":[...]}` Frames
+`SetFilter` wurde **immer** mit `{"type":3,"result":null}` (Erfolg) bestätigt
+— aber „akzeptiert" ≠ „subscribed". Ein **leerer oder `null`** `calendars`-
+Array registriert die Connection für **keine** Kalender. Erst mit den
+**echten internen Calendar-UUIDs** im Array fließen Pushes:
 
-Drei Filter-Formate getestet, alle gleicher Befund:
-- `calendars: []` (v1.0.0/1.0.1)
-- `calendars: [<internal-uuid>]` (v1.0.2)
-- `calendars: null` (v1.0.3+)
+```
+calendars: []              → 0 Notifications  (v1.0.0/1.0.1)
+calendars: null            → 0 Notifications  (v1.0.3–1.5)
+calendars: [<echte cal-id>]→ Notification in ~1 s  ✅ (v1.6.0)
+```
 
-**Hypothesen für die fehlenden Notifications:**
+Die `subscribe*Calendars`-Booleans allein reichen **nicht** — die `calendars`-
+Liste ist Pflicht.
 
-1. **Same-Account-Suppression**: Daelys Realtime-Server fired Notifications
-   nur an Connections **anderer** User-Accounts. Edits durch denselben
-   Account erzeugen keine Pushes an Connections dieses Accounts. Wäre
-   technisch sinnvoll: "der User der den Edit macht, weiß ja schon was er
-   gemacht hat — keine Notification nötig".
-   
-   Im Test-Setup gibt es nur **einen** Daely-Account (Mehrere Profile in
-   der Familie haben kein eigenes Login → Profile mit `userId=null`).
-   Bridge + Tablet teilen sich diesen Account. Wenn Hypothese 1 stimmt,
-   ist Realtime in dieser Konfiguration strukturell nutzlos.
+### Ursache 2 — Subject-Format-Annahme war falsch
 
-2. **Subtile Filter-/Header-Discrepancy**: die Dart-App schickt etwas
-   was wir statisch nicht sehen — extra Header, Connection-Capability,
-   oder eine zusätzliche Hub-Methode die in einer anderen
-   Service-Klasse invoked wird. Aufzulösen nur per mitmproxy gegen
-   Tablet-Traffic.
+Selbst wenn der Push angekommen wäre, hätte ihn `is_calendar_event` verworfen:
+der Code erwartete `calendar/event` (Slash), das echte Subject ist aber
+`calendar.calendar.<id>.event.<id>.<action>` (Punkte). Siehe RealtimeEvent-
+Abschnitt oben.
 
-3. **Server-side-Bug oder Wartung**: weniger wahrscheinlich, da die
-   offizielle App lt. Beobachtung Realtime-Updates **bekommt** —
-   aber das würde ein zweiter Account oder Multi-Device-Setup
-   bestätigen müssen.
+### Widerlegt: „Same-Account-Suppression" (v1.1.0-Hypothese)
 
-**Status:** Bridge-Code ist sauber implementiert + getestet (offline 298
-Tests grün). Feature ist als **experimentell** markiert (`realtime.enabled:
-false` als Default in v1.1.0). Falls jemand mit Multi-Account-Setup das
-testet und Notifications empfängt, ist das die definitive Bestätigung
-von Hypothese 2 (irgendwas am Filter ist anders) — sonst Hypothese 1
-(strukturelle Limitation).
+Die v1.1.0-Vermutung — der Server pushe nicht an weitere Connections desselben
+Accounts — war **falsch**. Belege:
+- Handy ↔ Tablet desselben Accounts sehen sich gegenseitig per Push
+  (regelmäßiger User-Workflow, kein Tablet-Eingriff nötig).
+- Mit korrektem `calendars`-Array empfängt unsere Bridge-Connection (gleicher
+  Account) den Push sofort.
 
-**Nächster Investigations-Schritt** (falls je relevant): mitmproxy auf
-einem Hilfs-Rechner, Tablet's WLAN-Proxy auf den Hilfs-Rechner stellen,
-Daely-CA-Cert akzeptieren (kein Pinning observed), Live-Edit machen,
-`POST .../realtime?id=...`-Body mit der echten App-Filter-Form
-extrahieren, anonymisieren, Bridge 1:1 darauf abgleichen.
+Es war nie eine strukturelle Limitation — nur ein leerer Array + ein falscher
+Parser. Kein mitmproxy nötig; der Re-Test mit garantiert-gutem Trigger
+(Termin am Handy anlegen) + echten Calendar-IDs hat's geklärt.
+
+### Verifizierter Connection-Lifecycle (unverändert korrekt)
+
+- `POST /realtime/negotiate?negotiateVersion=1` → 200, `connectionToken`
+- `GET /realtime?id=<token>` (+ `&access_token=<at>`) → 200 `text/event-stream`
+- Handshake `{"protocol":"json","version":1}\x1e` → Server: `{}`
+- `SetFilter`-Invocation **mit echten calendar-IDs** → `{"type":3,"result":null}`
+- Pings `{"type":6}` alle 15 s
+- Bei Change: `{"type":1,"target":"ReceiveNotification","arguments":[{…}]}`

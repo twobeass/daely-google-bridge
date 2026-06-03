@@ -558,27 +558,28 @@ class RealtimeClient:
         self.stats.notifications_received += 1
         self.stats.last_event_at = datetime.now(timezone.utc)
 
-        # First-time-per-subject debug log: full payload, so we can validate
-        # the event shape against the static RE assumptions in production.
-        subj = event.subject or "<no-subject>"
-        if subj not in self._logged_subjects:
-            self._logged_subjects.add(subj)
+        # Dedup the verbose first-time log on (domain, action), NOT the full
+        # subject — the real subject embeds a per-event UUID, so it's unique
+        # every time and would re-log the full payload on every event.
+        kind = f"{event.domain}.{event.action}"
+        if kind not in self._logged_subjects:
+            self._logged_subjects.add(kind)
             log.info(
-                "realtime.first_event_for_subject",
-                subject=subj, raw=payload,
+                "realtime.first_event_for_kind",
+                kind=kind, raw=payload,
             )
         else:
             log.info(
                 "realtime.event",
-                subject=subj,
-                main_topic=event.main_topic,
-                entity_id=event.entityId,
+                domain=event.domain,
+                action=event.action,
+                event_id=event.event_id,
             )
 
         try:
             self._on_event(event)
         except Exception:
-            log.exception("realtime.callback_failed", subject=subj)
+            log.exception("realtime.callback_failed", kind=kind)
 
 
 # ─────────────────── private exceptions ───────────────────

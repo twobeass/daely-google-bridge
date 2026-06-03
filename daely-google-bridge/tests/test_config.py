@@ -230,12 +230,14 @@ def test_example_yaml_loads_and_validates():
 # ────────── realtime section (§1.1) ──────────
 
 
-def test_realtime_defaults_to_disabled():
+def test_realtime_defaults_to_enabled():
+    """Since v1.6.0 realtime is on by default with auto calendar discovery."""
     cfg = BridgeConfig(
         daely_email="x@example.com",
         google_oauth_client_secrets_file=Path("/tmp/x"),
     )
-    assert cfg.realtime.enabled is False
+    assert cfg.realtime.enabled is True
+    assert cfg.realtime.calendar_filter_mode == "auto"
     assert cfg.realtime.debounce_seconds == 2.0
     assert cfg.realtime.subscribe_user_calendars is True
     assert cfg.realtime.subscribe_group_calendars is True
@@ -243,13 +245,13 @@ def test_realtime_defaults_to_disabled():
     assert cfg.realtime.subscribe_checklists is False
 
 
-def test_realtime_can_be_enabled():
+def test_realtime_can_be_disabled():
     cfg = BridgeConfig(
         daely_email="x@example.com",
         google_oauth_client_secrets_file=Path("/tmp/x"),
-        realtime={"enabled": True, "debounce_seconds": 5.0},
+        realtime={"enabled": False, "debounce_seconds": 5.0},
     )
-    assert cfg.realtime.enabled is True
+    assert cfg.realtime.enabled is False
     assert cfg.realtime.debounce_seconds == 5.0
 
 
