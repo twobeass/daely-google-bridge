@@ -23,6 +23,8 @@ deleted) so reruns are convergent.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -97,6 +99,21 @@ def _store_key(event: CalendarEvent) -> str:
     keeps the mapping stable across windows.
     """
     return event.recurringId or event.id
+
+
+def _body_fingerprint(body: dict) -> str:
+    """Stable hash of a rendered Google event body.
+
+    Used by the no-op check to detect when the desired Google state changed
+    even though Daely's `event.updated` did not — most importantly when a
+    single recurring instance is deleted (Daely drops it from the expansion
+    silently, so `updated` stays put but the synthesized EXDATE set changes).
+
+    The body is fully derived from the event/calendar/profiles (no timestamps
+    or nondeterminism), so `json.dumps(sort_keys=True)` is a stable key.
+    """
+    serialized = json.dumps(body, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _delete_via_google(
@@ -177,6 +194,8 @@ def _process_event(
         # calendarType), but guard against future filter extensions.
         return
 
+    fingerprint = _body_fingerprint(body)
+
     existing = store.get_event_mapping(daely_id)
     if existing is None:
         # Insert. Insert-failures aren't tracked in the retry-cooldown system;
@@ -189,6 +208,7 @@ def _process_event(
                 google_event_id=response["id"],
                 google_calendar_id=google_calendar_id,
                 last_seen_updated=event.updated,
+                body_fingerprint=fingerprint,
             )
             report.inserts += 1
             log.info(
@@ -220,9 +240,20 @@ def _process_event(
         )
         return
 
-    # No-op only if there's nothing to change AND no failure pending. A
-    # cooldown-elapsed failed mapping falls through to a retry below.
-    if existing.last_seen_updated == event.updated and not existing.failed:
+    # No-op only if there's nothing to change AND no failure pending. We
+    # require BOTH the source `updated` to be unchanged AND the rendered body
+    # to match what we last pushed (by fingerprint). The body check catches
+    # changes Daely makes without bumping `updated` — chiefly a deleted
+    # recurring instance, which alters the synthesized EXDATE set but leaves
+    # the master's `updated` untouched. A NULL fingerprint (pre-v3 mappings)
+    # never matches, so each existing mapping re-patches exactly once after
+    # upgrade and then settles. A cooldown-elapsed failed mapping falls
+    # through to a retry below.
+    if (
+        existing.last_seen_updated == event.updated
+        and existing.body_fingerprint == fingerprint
+        and not existing.failed
+    ):
         report.no_ops += 1
         return
 
@@ -238,6 +269,7 @@ def _process_event(
             google_event_id=existing.google_event_id,
             google_calendar_id=existing.google_calendar_id,
             last_seen_updated=event.updated,
+            body_fingerprint=fingerprint,
         )
         report.patches += 1
         log.info(

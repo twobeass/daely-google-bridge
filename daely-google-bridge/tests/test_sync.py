@@ -16,9 +16,11 @@ from daely_google_bridge.models import (
     Profile,
     StartEnd,
 )
+from daely_google_bridge.mapper import daely_event_to_google
 from daely_google_bridge.store import Store
 from daely_google_bridge.sync import (
     SyncReport,
+    _body_fingerprint,
     full_sync,
     incremental_sync,
 )
@@ -135,6 +137,20 @@ def _google_mock(*, insert_id: str = "g-new") -> MagicMock:
     return google
 
 
+def _expected_fingerprint(ev, cwe, cfg, *, exdates=None, profiles_map=None):
+    """Mirror exactly how _process_event renders + fingerprints the body, so
+    tests can pre-seed a mapping with the fingerprint a genuine no-op expects."""
+    apply_colors = cfg.color_mapping.enabled
+    body = daely_event_to_google(
+        ev, cwe, cfg.profile_calendar_mapping,
+        profiles_map=profiles_map or {},
+        apply_colors=apply_colors,
+        color_overrides=cfg.color_mapping.profile_overrides if apply_colors else None,
+        recurrence_exdates=exdates,
+    )
+    return _body_fingerprint(body)
+
+
 @pytest.fixture()
 def store():
     s = Store(":memory:")
@@ -224,23 +240,103 @@ def test_full_sync_patches_when_updated_changed(store):
 
 def test_full_sync_no_op_when_updated_unchanged(store):
     same_updated = datetime(2026, 4, 27, 18, 37, 31, tzinfo=timezone.utc)
+    ev = _event(id="ev-1", updated=same_updated)
+    cwe = _calendar_with_events(events=[ev])
+    cfg = _config()
     store.put_event_mapping(
         daely_id="ev-1",
         daely_calendar_id="daely-cal-1",
         google_event_id="g-existing",
         google_calendar_id=GOOGLE_CAL_A,
         last_seen_updated=same_updated,
+        body_fingerprint=_expected_fingerprint(ev, cwe, cfg),
     )
-    ev = _event(id="ev-1", updated=same_updated)
-    daely = _daely_mock([_calendar_with_events(events=[ev])])
+    daely = _daely_mock([cwe])
     google = _google_mock()
 
-    report = full_sync(daely, google, store, _config())
+    report = full_sync(daely, google, store, cfg)
     assert report.no_ops == 1
     assert report.inserts == 0
     assert report.patches == 0
     google.insert_event.assert_not_called()
     google.patch_event.assert_not_called()
+
+
+def test_full_sync_repatches_when_body_changed_despite_unchanged_updated(store):
+    """Core regression: Daely deletes a single recurring instance silently —
+    `updated` stays put, but the synthesized EXDATE set changes. The body
+    fingerprint differs from what we last pushed → we must re-patch, not no-op."""
+    same_updated = datetime(2026, 4, 27, 18, 37, 31, tzinfo=timezone.utc)
+    master = "00000000-0000-0000-0005-000000000099"
+    # Weekly Friday series, 4 instances → no gap yet.
+    full_starts = [
+        ("2026-05-01T15:50:00+02:00", "2026-05-01T16:50:00+02:00"),
+        ("2026-05-08T15:50:00+02:00", "2026-05-08T16:50:00+02:00"),
+        ("2026-05-15T15:50:00+02:00", "2026-05-15T16:50:00+02:00"),
+        ("2026-05-22T15:50:00+02:00", "2026-05-22T16:50:00+02:00"),
+    ]
+    full_events = [
+        _event(id=f"{master}_{i}", recurringId=master, updated=same_updated,
+               recurrence=["RRULE:FREQ=WEEKLY;BYDAY=FR"], start_dt=s, end_dt=e)
+        for i, (s, e) in enumerate(full_starts)
+    ]
+    cfg = _config()
+    cwe_full = _calendar_with_events(events=full_events)
+    daely = _daely_mock([cwe_full])
+    google = _google_mock()
+
+    # First sync: inserts the master, stores fingerprint (no gap → no EXDATE).
+    full_sync(daely, google, store, cfg)
+    assert store.get_event_mapping(master) is not None
+
+    # Now the user deletes the 2026-05-15 instance in Daely: it vanishes from
+    # the expansion, but the master's `updated` is unchanged.
+    gapped_events = [e for e in full_events if "_2" not in e.id]  # drop index-2
+    daely2 = _daely_mock([_calendar_with_events(events=gapped_events)])
+    google2 = _google_mock()
+
+    report = full_sync(daely2, google2, store, cfg)
+
+    assert report.patches == 1, "deleted instance must trigger a re-patch"
+    assert report.no_ops == 0
+    google2.patch_event.assert_called_once()
+    _, _, body = google2.patch_event.call_args.args
+    assert any("EXDATE" in line and "20260515" in line
+               for line in body.get("recurrence", [])), \
+        "patched body must carry the synthesized EXDATE for the deleted instance"
+
+
+def test_full_sync_repatches_once_for_null_fingerprint(store):
+    """Pre-v3 mappings have body_fingerprint=NULL. Even with matching `updated`,
+    the first sync after upgrade re-patches once (self-healing), then settles."""
+    same_updated = datetime(2026, 4, 27, 18, 37, 31, tzinfo=timezone.utc)
+    ev = _event(id="ev-1", updated=same_updated)
+    cwe = _calendar_with_events(events=[ev])
+    cfg = _config()
+    store.put_event_mapping(
+        daely_id="ev-1",
+        daely_calendar_id="daely-cal-1",
+        google_event_id="g-existing",
+        google_calendar_id=GOOGLE_CAL_A,
+        last_seen_updated=same_updated,
+        # body_fingerprint omitted → NULL, as for any mapping written pre-v3.
+    )
+    daely = _daely_mock([cwe])
+    google = _google_mock()
+
+    # First pass: NULL fingerprint mismatches → re-patch, fingerprint stored.
+    r1 = full_sync(daely, google, store, cfg)
+    assert r1.patches == 1
+    assert r1.no_ops == 0
+    assert store.get_event_mapping("ev-1").body_fingerprint is not None
+
+    # Second pass: fingerprint now populated and matching → genuine no-op.
+    daely2 = _daely_mock([_calendar_with_events(events=[ev])])
+    google2 = _google_mock()
+    r2 = full_sync(daely2, google2, store, cfg)
+    assert r2.no_ops == 1
+    assert r2.patches == 0
+    google2.patch_event.assert_not_called()
 
 
 # ─────────────── delete ───────────────
