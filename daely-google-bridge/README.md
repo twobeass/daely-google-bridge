@@ -17,7 +17,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 
-pytest -q          # 135 Tests, ~91% Coverage, läuft offline
+pytest -q          # 363 Tests, läuft vollständig offline
 ```
 
 Die Bridge selbst aus dem Source ohne Docker laufen lassen geht auch — du
@@ -39,9 +39,9 @@ BRIDGE_IMAGE=local/daely-google-bridge:dev docker compose up -d
 ```
 src/daely_google_bridge/
 ├── __main__.py        # python -m daely_google_bridge ...
-├── cli.py             # argparse + bootstrap + run + status + resync
+├── cli.py             # argparse + login-daely + bootstrap/run/status/resync
 ├── config.py          # BridgeConfig (pydantic) + YAML I/O
-├── daely_client.py    # Daely-Backend-Client (ROPC + 6 GETs)
+├── daely_client.py    # Typed Daely client: calendar, recipes, groceries, auth
 ├── google_client.py   # Google Calendar v3 Wrapper (OAuth + Events-CRUD)
 ├── mapper.py          # pure Funktion: Daely-Event → Google-Event-Body
 ├── models.py          # pydantic-Modelle für Daely-Wire-Format
@@ -54,6 +54,10 @@ src/daely_google_bridge/
 Alle Tests laufen **komplett offline**:
 
 - `test_daely_client.py` — HTTPS gegen Daely via [respx](https://github.com/lundberg/respx) gemockt
+- `test_list_meal_client.py` — Legacy- und aktuelle v2-Checklisten,
+  v2-Mahlzeitenplan und vollständige v2-Rezepte
+- `test_grocery_client.py` — v2-Einkaufsliste und Kundenkarten inklusive
+  exakter JSON-Wrapper
 - `test_google_client.py` / `test_google_oauth_flow.py` — `googleapiclient`-Resource via `unittest.mock`
 - `test_mapper.py` / `test_sync.py` — laufen gegen anonymisierte Live-Read-
   Fixtures aus `../tests/fixtures_anonymized/`

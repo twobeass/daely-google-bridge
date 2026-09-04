@@ -22,7 +22,14 @@ Endpoints used:
 - `GET  /api/groups/<gid>/calendars/with-events?startDate=&endDate=`
 - `GET  /api/external-accounts`  list[ExternalAccount]
 - `GET  /api/url-calendars`      list[UrlCalendar]
+- `GET/POST/PUT/DELETE /api/groups/<gid>/checklists/...` (legacy)
+- `GET/POST/PUT/DELETE /api/groups/<gid>/meal-plan/...` (legacy)
+- `GET/POST/PUT/DELETE /api/v2/groups/<gid>/checklists/...`
+- `GET/POST/PUT/DELETE /api/v2/groups/<gid>/meal-plan/entries/...`
+- `GET/POST/PUT/DELETE /api/v2/groups/<gid>/meals/...`
+- `GET/POST/PUT/DELETE /api/v2/groups/<gid>/grocery/...`
 """
+
 from __future__ import annotations
 
 import time
@@ -35,8 +42,48 @@ import structlog
 from .models import (
     Calendar,
     CalendarWithEvents,
+    Checklist,
+    ChecklistCreateRequest,
+    ChecklistItem,
+    ChecklistItemMutationResult,
+    ChecklistItemReorderResult,
+    ChecklistItemsMutationResult,
+    ChecklistMutationResult,
+    ChecklistSortDirection,
+    ChecklistSortMode,
+    ChecklistsOverview,
+    ChecklistSyncRequest,
+    ChecklistSyncResponse,
+    CreateGroceryListItemRequest,
+    CreateGroceryListItemsRequest,
+    DeleteRecurrenceType,
     ExternalAccount,
+    GroceryItem,
+    GroceryItemMutationResult,
+    GroceryItemOverview,
+    GroceryListItem,
+    GroceryListItemCheckResult,
+    GroceryListItemMutationResult,
+    GroceryListItemsMutationResult,
+    GroceryListOverview,
+    GroceryOverview,
     Group,
+    LoyaltyCard,
+    LoyaltyCardMutationResult,
+    LoyaltyCardOverview,
+    LoyaltyCardReorderResult,
+    Meal,
+    MealCategory,
+    MealCategoryMutationResult,
+    MealCategoryV2,
+    MealDetail,
+    MealMutationResult,
+    MealPlanEntries,
+    MealPlanEntry,
+    MealPlanEntryMutationResult,
+    MealPlanOverview,
+    MealsOverview,
+    PaginatedMeals,
     Profile,
     UrlCalendar,
     UserMe,
@@ -48,14 +95,60 @@ DEFAULT_CLIENT_ID = "mobile-app"
 DEFAULT_USER_AGENT = "daely-google-bridge/0.1 (research; private use)"
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
-_BACKOFF_BASE = 1.0      # seconds
-_BACKOFF_MAX = 300.0     # 5 min cap
+_BACKOFF_BASE = 1.0  # seconds
+_BACKOFF_MAX = 300.0  # 5 min cap
 
 log = structlog.get_logger(__name__)
 
 
 class DaelyAuthError(RuntimeError):
     """ROPC failed (wrong password, MFA enabled, account locked, etc.)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error: str | None = None,
+        error_description: str | None = None,
+    ):
+        details = []
+        if status_code is not None:
+            details.append(f"status={status_code}")
+        if error:
+            details.append(f"error={error}")
+        if error_description:
+            details.append(f"description={error_description}")
+        if details:
+            message = f"{message}: {', '.join(details)}"
+        super().__init__(message)
+        self.status_code = status_code
+        self.error = error
+        self.error_description = error_description
+
+
+def _oidc_auth_error(operation: str, response: httpx.Response) -> DaelyAuthError:
+    """Build a useful auth error without retaining arbitrary response content."""
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    def safe_text(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        # Keycloak's two documented error fields are enough for diagnosis.
+        # Collapse control/whitespace and cap output rather than echoing a raw body.
+        return " ".join(value.split())[:200] or None
+
+    return DaelyAuthError(
+        f"{operation} failed",
+        status_code=response.status_code,
+        error=safe_text(payload.get("error")),
+        error_description=safe_text(payload.get("error_description")),
+    )
 
 
 class DaelyAPIError(RuntimeError):
@@ -149,16 +242,11 @@ class DaelyClient:
                 "client_id": self.client_id,
                 "username": email,
                 "password": password,
-                "scope": "openid profile email offline_access",
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         if resp.status_code != 200:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise DaelyAuthError(f"ROPC failed: status={resp.status_code} body={body!r}")
+            raise _oidc_auth_error("ROPC", resp)
         data = resp.json()
         self._tokens.access_token = data["access_token"]
         self._tokens.refresh_token = data.get("refresh_token")
@@ -185,11 +273,7 @@ class DaelyClient:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         if resp.status_code != 200:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise DaelyAuthError(f"refresh failed: status={resp.status_code} body={body!r}")
+            raise _oidc_auth_error("refresh", resp)
         data = resp.json()
         self._tokens.access_token = data["access_token"]
         # Keycloak rotates the refresh token by default — store the new one.
@@ -208,7 +292,7 @@ class DaelyClient:
         self._last_call_at = time.monotonic()
 
     def _backoff_seconds(self, attempt: int) -> float:
-        return min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_MAX)
+        return min(_BACKOFF_BASE * (2**attempt), _BACKOFF_MAX)
 
     def _request(
         self,
@@ -217,12 +301,11 @@ class DaelyClient:
         *,
         params: dict | None = None,
         json: dict | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
         _retried_after_refresh: bool = False,
     ) -> httpx.Response:
         if not self._tokens.access_token:
-            raise DaelyAuthError(
-                "no access_token; call login_password() or set_tokens() first"
-            )
+            raise DaelyAuthError("no access_token; call login_password() or set_tokens() first")
 
         url = f"{self.api_base}{path}"
         headers = {
@@ -235,14 +318,23 @@ class DaelyClient:
             self._pause_if_needed()
             try:
                 resp = self.httpx_client.request(
-                    method, url, params=params, json=json, headers=headers,
+                    method,
+                    url,
+                    params=params,
+                    json=json,
+                    files=files,
+                    headers=headers,
                 )
             except httpx.HTTPError as e:
                 last_exc = e
                 wait = self._backoff_seconds(attempt)
                 log.warning(
                     "daely.request.transport_error",
-                    method=method, path=path, attempt=attempt, wait=wait, err=repr(e),
+                    method=method,
+                    path=path,
+                    attempt=attempt,
+                    wait=wait,
+                    err=repr(e),
                 )
                 time.sleep(wait)
                 continue
@@ -251,7 +343,11 @@ class DaelyClient:
                 log.info("daely.request.401_refreshing", method=method, path=path)
                 self.refresh()
                 return self._request(
-                    method, path, params=params, json=json,
+                    method,
+                    path,
+                    params=params,
+                    json=json,
+                    files=files,
                     _retried_after_refresh=True,
                 )
 
@@ -259,8 +355,11 @@ class DaelyClient:
                 wait = self._backoff_seconds(attempt)
                 log.warning(
                     "daely.request.5xx_backoff",
-                    method=method, path=path, status=resp.status_code,
-                    attempt=attempt, wait=wait,
+                    method=method,
+                    path=path,
+                    status=resp.status_code,
+                    attempt=attempt,
+                    wait=wait,
                 )
                 time.sleep(wait)
                 continue
@@ -340,6 +439,837 @@ class DaelyClient:
     def get_url_calendars(self) -> list[UrlCalendar]:
         resp = self._request("GET", "/api/url-calendars")
         return [UrlCalendar.model_validate(u) for u in resp.json()]
+
+    # ────────────── legacy checklists ──────────────
+
+    def get_checklists(self, group_id: str) -> list[Checklist]:
+        resp = self._request("GET", f"/api/groups/{group_id}/checklists")
+        return [Checklist.model_validate(item) for item in resp.json()]
+
+    def create_checklist(self, group_id: str, *, name: str) -> Checklist:
+        resp = self._request(
+            "POST",
+            f"/api/groups/{group_id}/checklists",
+            json={"name": name},
+        )
+        return Checklist.model_validate(resp.json())
+
+    def update_checklist(
+        self,
+        group_id: str,
+        checklist_id: str,
+        *,
+        name: str,
+        item_sort_mode: ChecklistSortMode,
+        item_sort_direction: ChecklistSortDirection,
+    ) -> None:
+        self._request(
+            "PUT",
+            f"/api/groups/{group_id}/checklists/{checklist_id}",
+            json={
+                "name": name,
+                "itemSortMode": item_sort_mode,
+                "itemSortDirection": item_sort_direction,
+            },
+        )
+
+    def delete_checklist(self, group_id: str, checklist_id: str) -> None:
+        self._request("DELETE", f"/api/groups/{group_id}/checklists/{checklist_id}")
+
+    def reorder_checklists(self, group_id: str, ordered_ids: list[str]) -> None:
+        self._request(
+            "PUT",
+            f"/api/groups/{group_id}/checklists/reorder",
+            json={"orderedIds": ordered_ids},
+        )
+
+    def create_checklist_item(
+        self,
+        group_id: str,
+        checklist_id: str,
+        *,
+        title: str,
+    ) -> ChecklistItem:
+        resp = self._request(
+            "POST",
+            f"/api/groups/{group_id}/checklists/{checklist_id}/items",
+            json={"title": title, "completed": False},
+        )
+        return ChecklistItem.model_validate(resp.json())
+
+    def update_checklist_item(
+        self,
+        group_id: str,
+        checklist_id: str,
+        item_id: str,
+        *,
+        title: str,
+    ) -> None:
+        self._request(
+            "PUT",
+            f"/api/groups/{group_id}/checklists/{checklist_id}/items/{item_id}",
+            json={"title": title},
+        )
+
+    def set_checklist_item_completed(
+        self,
+        group_id: str,
+        checklist_id: str,
+        item_id: str,
+        *,
+        completed: bool,
+    ) -> ChecklistItem:
+        resp = self._request(
+            "PUT",
+            f"/api/groups/{group_id}/checklists/{checklist_id}/items/{item_id}",
+            json={"completed": completed},
+        )
+        return ChecklistItem.model_validate(resp.json())
+
+    def delete_checklist_item(
+        self,
+        group_id: str,
+        checklist_id: str,
+        item_id: str,
+    ) -> None:
+        self._request(
+            "DELETE",
+            f"/api/groups/{group_id}/checklists/{checklist_id}/items/{item_id}",
+        )
+
+    def reorder_checklist_items(
+        self,
+        group_id: str,
+        checklist_id: str,
+        ordered_ids: list[str],
+    ) -> None:
+        self._request(
+            "PUT",
+            f"/api/groups/{group_id}/checklists/{checklist_id}/items/reorder",
+            json={"orderedIds": ordered_ids},
+        )
+
+    # ────────────── v2 checklists (smartphone app >= 1.5.2) ──────────────
+
+    def sync_checklists_v2(
+        self,
+        group_id: str,
+        request: ChecklistSyncRequest,
+    ) -> ChecklistSyncResponse:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/checklists/sync",
+            json=self._model_body(request),
+        )
+        return ChecklistSyncResponse.model_validate(resp.json())
+
+    def get_checklists_v2(
+        self,
+        group_id: str,
+        *,
+        include_items_for: list[str] | None = None,
+    ) -> ChecklistsOverview:
+        params: dict[str, str | list[str]] = {
+            "includeAllItems": "false",
+            "includeProgress": "true",
+        }
+        if include_items_for:
+            params["includeItemsFor"] = include_items_for
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/checklists",
+            params=params,
+        )
+        return ChecklistsOverview.model_validate(resp.json())
+
+    def get_checklist_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+    ) -> ChecklistMutationResult:
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}",
+        )
+        return ChecklistMutationResult.model_validate(resp.json())
+
+    def create_checklist_v2(
+        self,
+        group_id: str,
+        request: ChecklistCreateRequest,
+    ) -> ChecklistMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/checklists",
+            json=self._model_body(request),
+        )
+        return ChecklistMutationResult.model_validate(resp.json())
+
+    def update_checklist_v2(
+        self,
+        group_id: str,
+        checklist: Checklist,
+    ) -> ChecklistMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/checklists/{checklist.id}",
+            json=self._model_body(checklist),
+        )
+        return ChecklistMutationResult.model_validate(resp.json())
+
+    def delete_checklist_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+    ) -> ChecklistMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}",
+        )
+        return ChecklistMutationResult.model_validate(resp.json())
+
+    def create_checklist_item_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+        *,
+        title: str,
+    ) -> ChecklistItemMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/items",
+            json={"title": title, "completed": False},
+        )
+        return ChecklistItemMutationResult.model_validate(resp.json())
+
+    def update_checklist_item_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+        item_id: str,
+        *,
+        title: str,
+    ) -> ChecklistItemMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/items/{item_id}",
+            json={"title": title},
+        )
+        return ChecklistItemMutationResult.model_validate(resp.json())
+
+    def set_checklist_item_completed_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+        item_id: str,
+        *,
+        completed: bool,
+    ) -> ChecklistItemMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/items/{item_id}",
+            json={"completed": completed},
+        )
+        return ChecklistItemMutationResult.model_validate(resp.json())
+
+    def delete_checklist_item_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+        item_id: str,
+    ) -> ChecklistItemMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/items/{item_id}",
+        )
+        return ChecklistItemMutationResult.model_validate(resp.json())
+
+    def reorder_checklist_items_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+        ordered_ids: list[str],
+    ) -> ChecklistItemReorderResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/items/reorder",
+            json={"orderedIds": ordered_ids},
+        )
+        return ChecklistItemReorderResult.model_validate(resp.json())
+
+    def uncheck_all_checklist_items_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+    ) -> ChecklistItemsMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/uncheck-all",
+        )
+        return ChecklistItemsMutationResult.model_validate(resp.json())
+
+    def delete_checklist_items_v2(
+        self,
+        group_id: str,
+        checklist_id: str,
+        *,
+        completed_only: bool = True,
+    ) -> ChecklistItemsMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/checklists/{checklist_id}/items",
+            params={"completedOnly": str(completed_only).lower()},
+        )
+        return ChecklistItemsMutationResult.model_validate(resp.json())
+
+    # ────────────── v2 grocery list (smartphone app >= 1.5.2) ──────────────
+
+    def get_grocery_items_v2(
+        self,
+        group_id: str,
+        *,
+        include_default: bool = True,
+    ) -> GroceryItemOverview:
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/grocery/items",
+            params={"includeDefault": str(include_default).lower()},
+        )
+        return GroceryItemOverview.model_validate(resp.json())
+
+    def get_grocery_list_v2(self, group_id: str) -> GroceryListOverview:
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/grocery/lists/default/list-items",
+        )
+        return GroceryListOverview.model_validate(resp.json())
+
+    def get_grocery_overview_v2(
+        self,
+        group_id: str,
+        *,
+        include_list_items: bool = True,
+        include_categories: bool = True,
+        include_group_items: bool = True,
+        include_default_items: bool = True,
+        include_loyalty_cards: bool = False,
+    ) -> GroceryOverview:
+        params = {
+            "includeListItems": str(include_list_items).lower(),
+            "includeCategories": str(include_categories).lower(),
+            "includeGroupItems": str(include_group_items).lower(),
+            "includeDefaultItems": str(include_default_items).lower(),
+            "includeLoyaltyCards": str(include_loyalty_cards).lower(),
+        }
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/grocery/overview",
+            params=params,
+        )
+        return GroceryOverview.model_validate(resp.json())
+
+    def update_grocery_item_v2(
+        self,
+        group_id: str,
+        item: GroceryItem,
+    ) -> GroceryItemMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/grocery/items/{item.id}",
+            json=self._model_body(item),
+        )
+        return GroceryItemMutationResult.model_validate(resp.json())
+
+    def delete_grocery_item_v2(
+        self,
+        group_id: str,
+        item_id: str,
+    ) -> GroceryItemMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/grocery/items/{item_id}",
+        )
+        return GroceryItemMutationResult.model_validate(resp.json())
+
+    def add_grocery_list_item_v2(
+        self,
+        group_id: str,
+        item: CreateGroceryListItemRequest,
+    ) -> GroceryListItemMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/grocery/lists/default/list-items",
+            json=self._model_body(item),
+        )
+        return GroceryListItemMutationResult.model_validate(resp.json())
+
+    def add_grocery_list_items_v2(
+        self,
+        group_id: str,
+        items: CreateGroceryListItemsRequest,
+    ) -> GroceryListItemsMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/grocery/lists/default/list-items/batch",
+            json=self._model_body(items),
+        )
+        return GroceryListItemsMutationResult.model_validate(resp.json())
+
+    def update_grocery_list_item_v2(
+        self,
+        group_id: str,
+        item: GroceryListItem,
+    ) -> GroceryListItemMutationResult:
+        item_id = self._require_resource_id("grocery list item", item.id)
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/grocery/lists/default/list-items/{item_id}",
+            json=self._model_body(item),
+        )
+        return GroceryListItemMutationResult.model_validate(resp.json())
+
+    def set_grocery_list_item_checked_v2(
+        self,
+        group_id: str,
+        item_id: str,
+        *,
+        is_checked: bool,
+    ) -> GroceryListItemCheckResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/grocery/lists/default/list-items/{item_id}/check",
+            json={"isChecked": is_checked},
+        )
+        return GroceryListItemCheckResult.model_validate(resp.json())
+
+    def get_loyalty_cards_v2(self, group_id: str) -> LoyaltyCardOverview:
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/grocery/loyalty-cards",
+        )
+        return LoyaltyCardOverview.model_validate(resp.json())
+
+    def create_loyalty_card_v2(
+        self,
+        group_id: str,
+        card: LoyaltyCard,
+    ) -> LoyaltyCardMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/grocery/loyalty-cards",
+            json=self._model_body(card),
+        )
+        return LoyaltyCardMutationResult.model_validate(resp.json())
+
+    def update_loyalty_card_v2(
+        self,
+        group_id: str,
+        card: LoyaltyCard,
+    ) -> LoyaltyCardMutationResult:
+        card_id = self._require_resource_id("loyalty card", card.id)
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/grocery/loyalty-cards/{card_id}",
+            json=self._model_body(card),
+        )
+        return LoyaltyCardMutationResult.model_validate(resp.json())
+
+    def delete_loyalty_card_v2(
+        self,
+        group_id: str,
+        card_id: str,
+    ) -> LoyaltyCardMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/grocery/loyalty-cards/{card_id}",
+        )
+        return LoyaltyCardMutationResult.model_validate(resp.json())
+
+    def reorder_loyalty_cards_v2(
+        self,
+        group_id: str,
+        ordered_ids: list[str],
+    ) -> LoyaltyCardReorderResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/grocery/loyalty-cards/reorder",
+            json={"orderedIds": ordered_ids},
+        )
+        return LoyaltyCardReorderResult.model_validate(resp.json())
+
+    # ────────────── meal plan / recipes ──────────────
+
+    @staticmethod
+    def _model_body(
+        model: (
+            Meal
+            | MealCategory
+            | MealPlanEntry
+            | MealDetail
+            | MealCategoryV2
+            | Checklist
+            | ChecklistCreateRequest
+            | ChecklistSyncRequest
+            | GroceryItem
+            | GroceryListItem
+            | CreateGroceryListItemRequest
+            | CreateGroceryListItemsRequest
+            | LoyaltyCard
+        ),
+    ) -> dict:
+        """Match the app's generated ``toJson`` output, including null fields."""
+        return model.model_dump(mode="json")
+
+    @staticmethod
+    def _require_resource_id(resource_name: str, resource_id: str | None) -> str:
+        if resource_id is None or not resource_id.strip():
+            raise ValueError(f"{resource_name}.id is required for this operation")
+        return resource_id
+
+    def get_meal_plan_overview(
+        self,
+        group_id: str,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> MealPlanOverview:
+        resp = self._request(
+            "GET",
+            f"/api/groups/{group_id}/meal-plan/overview",
+            params={"startDate": start_date.isoformat(), "endDate": end_date.isoformat()},
+        )
+        return MealPlanOverview.model_validate(resp.json())
+
+    def create_meal_category(
+        self,
+        group_id: str,
+        category: MealCategory,
+    ) -> MealCategory:
+        resp = self._request(
+            "POST",
+            f"/api/groups/{group_id}/meal-plan/categories",
+            json=self._model_body(category),
+        )
+        return MealCategory.model_validate(resp.json())
+
+    def update_meal_category(
+        self,
+        group_id: str,
+        category: MealCategory,
+    ) -> MealCategory:
+        category_id = self._require_resource_id("category", category.id)
+        resp = self._request(
+            "PUT",
+            f"/api/groups/{group_id}/meal-plan/categories/{category_id}",
+            json=self._model_body(category),
+        )
+        return MealCategory.model_validate(resp.json())
+
+    def delete_meal_category(self, group_id: str, category_id: str) -> None:
+        self._request(
+            "DELETE",
+            f"/api/groups/{group_id}/meal-plan/categories/{category_id}",
+        )
+
+    def create_meal(self, group_id: str, meal: Meal) -> Meal:
+        resp = self._request(
+            "POST",
+            f"/api/groups/{group_id}/meal-plan/meal",
+            json=self._model_body(meal),
+        )
+        return Meal.model_validate(resp.json())
+
+    def update_meal(self, group_id: str, meal: Meal) -> Meal:
+        meal_id = self._require_resource_id("meal", meal.id)
+        resp = self._request(
+            "PUT",
+            f"/api/groups/{group_id}/meal-plan/meal/{meal_id}",
+            json=self._model_body(meal),
+        )
+        return Meal.model_validate(resp.json())
+
+    def delete_meal(self, group_id: str, meal_id: str) -> None:
+        self._request("DELETE", f"/api/groups/{group_id}/meal-plan/meal/{meal_id}")
+
+    # The smartphone app introduced a separate full-recipe API in v1.5.2.
+    # Keep these methods explicitly suffixed so the legacy meal-plan summary
+    # methods above remain backwards compatible.
+
+    def get_meals_v2(
+        self,
+        group_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        category_id: str | None = None,
+        name: str | None = None,
+        defaults_for_language: str | None = None,
+        liked_by_profile_id: str | None = None,
+    ) -> PaginatedMeals:
+        params: dict[str, str | int] = {"page": page, "pageSize": page_size}
+        optional_params = {
+            "Filter.CategoryId": category_id,
+            "Filter.Name": name,
+            "Filter.DefaultsForLanguage": defaults_for_language,
+            "Filter.LikedByProfileId": liked_by_profile_id,
+        }
+        params.update({key: value for key, value in optional_params.items() if value is not None})
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/meals",
+            params=params,
+        )
+        return PaginatedMeals.model_validate(resp.json())
+
+    def get_meals_overview_v2(
+        self,
+        group_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        defaults_for_language: str | None = None,
+    ) -> MealsOverview:
+        params: dict[str, str | int] = {
+            "mealsPage": page,
+            "mealsPageSize": page_size,
+        }
+        if defaults_for_language is not None:
+            params["defaultsForLanguage"] = defaults_for_language
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/meals/overview",
+            params=params,
+        )
+        return MealsOverview.model_validate(resp.json())
+
+    def get_meal_v2(self, group_id: str, meal_id: str) -> MealMutationResult:
+        resp = self._request("GET", f"/api/v2/groups/{group_id}/meals/{meal_id}")
+        return MealMutationResult.model_validate(resp.json())
+
+    def create_meal_v2(self, group_id: str, meal: MealDetail) -> MealMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/meals",
+            json=self._model_body(meal),
+        )
+        return MealMutationResult.model_validate(resp.json())
+
+    def update_meal_v2(self, group_id: str, meal: MealDetail) -> MealMutationResult:
+        meal_id = self._require_resource_id("meal", meal.id)
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/meals/{meal_id}",
+            json=self._model_body(meal),
+        )
+        return MealMutationResult.model_validate(resp.json())
+
+    def delete_meal_v2(self, group_id: str, meal_id: str) -> MealMutationResult:
+        resp = self._request("DELETE", f"/api/v2/groups/{group_id}/meals/{meal_id}")
+        return MealMutationResult.model_validate(resp.json())
+
+    def create_meal_category_v2(
+        self,
+        group_id: str,
+        category: MealCategoryV2,
+    ) -> MealCategoryMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/meals/categories",
+            json=self._model_body(category),
+        )
+        return MealCategoryMutationResult.model_validate(resp.json())
+
+    def update_meal_category_v2(
+        self,
+        group_id: str,
+        category: MealCategoryV2,
+    ) -> MealCategoryMutationResult:
+        category_id = self._require_resource_id("category", category.id)
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/meals/categories/{category_id}",
+            json=self._model_body(category),
+        )
+        return MealCategoryMutationResult.model_validate(resp.json())
+
+    def delete_meal_category_v2(
+        self,
+        group_id: str,
+        category_id: str,
+    ) -> MealCategoryMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/meals/categories/{category_id}",
+        )
+        return MealCategoryMutationResult.model_validate(resp.json())
+
+    def set_meal_likes_v2(
+        self,
+        group_id: str,
+        meal_id: str,
+        *,
+        profile_ids: list[str],
+    ) -> MealMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/meals/{meal_id}/likes",
+            json={"profileIds": profile_ids},
+        )
+        return MealMutationResult.model_validate(resp.json())
+
+    def upload_meal_picture_v2(
+        self,
+        group_id: str,
+        meal_id: str,
+        *,
+        image_webp: bytes,
+    ) -> MealMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/meals/{meal_id}/picture",
+            files={
+                "imageFile": ("meal_image.webp", image_webp, "image/webp"),
+            },
+        )
+        return MealMutationResult.model_validate(resp.json())
+
+    def delete_meal_picture_v2(
+        self,
+        group_id: str,
+        meal_id: str,
+    ) -> MealMutationResult:
+        resp = self._request(
+            "DELETE",
+            f"/api/v2/groups/{group_id}/meals/{meal_id}/picture",
+        )
+        return MealMutationResult.model_validate(resp.json())
+
+    def create_meal_plan_entry(
+        self,
+        group_id: str,
+        entry: MealPlanEntry,
+    ) -> MealPlanEntry:
+        resp = self._request(
+            "POST",
+            f"/api/groups/{group_id}/meal-plan/entries",
+            json=self._model_body(entry),
+        )
+        return MealPlanEntry.model_validate(resp.json())
+
+    def replace_meal_plan_entry(
+        self,
+        group_id: str,
+        entry: MealPlanEntry,
+    ) -> MealPlanEntry:
+        resp = self._request(
+            "POST",
+            f"/api/groups/{group_id}/meal-plan/entries/replace",
+            json=self._model_body(entry),
+        )
+        return MealPlanEntry.model_validate(resp.json())
+
+    def update_meal_plan_entry(
+        self,
+        group_id: str,
+        entry: MealPlanEntry,
+    ) -> MealPlanEntry:
+        entry_id = self._require_resource_id("entry", entry.id)
+        resp = self._request(
+            "PUT",
+            f"/api/groups/{group_id}/meal-plan/entries/{entry_id}",
+            json=self._model_body(entry),
+        )
+        return MealPlanEntry.model_validate(resp.json())
+
+    def delete_meal_plan_entry(
+        self,
+        group_id: str,
+        entry_id: str,
+        *,
+        occurrence_date: date,
+        delete_type: DeleteRecurrenceType,
+    ) -> None:
+        self._request(
+            "DELETE",
+            f"/api/groups/{group_id}/meal-plan/entries/{entry_id}/{occurrence_date.isoformat()}",
+            params={"deleteType": int(delete_type)},
+        )
+
+    # The current smartphone service keeps recipes under `/meals` but moves
+    # dated meal-plan entries to their own v2 resource.
+
+    def get_meal_plan_entries_v2(
+        self,
+        group_id: str,
+        *,
+        week: date,
+        include_meals: bool = True,
+    ) -> MealPlanEntries:
+        resp = self._request(
+            "GET",
+            f"/api/v2/groups/{group_id}/meal-plan/entries",
+            params={
+                "week": week.isoformat(),
+                "includeMeals": str(include_meals).lower(),
+            },
+        )
+        return MealPlanEntries.model_validate(resp.json())
+
+    def create_meal_plan_entry_v2(
+        self,
+        group_id: str,
+        entry: MealPlanEntry,
+    ) -> MealPlanEntryMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/meal-plan/entries",
+            json=self._model_body(entry),
+        )
+        return MealPlanEntryMutationResult.model_validate(resp.json())
+
+    def replace_meal_plan_entry_v2(
+        self,
+        group_id: str,
+        entry: MealPlanEntry,
+    ) -> MealPlanEntryMutationResult:
+        resp = self._request(
+            "POST",
+            f"/api/v2/groups/{group_id}/meal-plan/entries/replace",
+            json=self._model_body(entry),
+        )
+        return MealPlanEntryMutationResult.model_validate(resp.json())
+
+    def update_meal_plan_entry_v2(
+        self,
+        group_id: str,
+        entry_id: str,
+        *,
+        recurrence: list[str],
+    ) -> MealPlanEntryMutationResult:
+        resp = self._request(
+            "PUT",
+            f"/api/v2/groups/{group_id}/meal-plan/entries/{entry_id}",
+            json={"recurrence": recurrence},
+        )
+        return MealPlanEntryMutationResult.model_validate(resp.json())
+
+    def delete_meal_plan_entry_v2(
+        self,
+        group_id: str,
+        entry_id: str,
+        *,
+        occurrence_date: date,
+        delete_type: DeleteRecurrenceType,
+    ) -> MealPlanEntryMutationResult:
+        resp = self._request(
+            "DELETE",
+            (
+                f"/api/v2/groups/{group_id}/meal-plan/entries/"
+                f"{entry_id}/{occurrence_date.isoformat()}"
+            ),
+            params={"deleteType": int(delete_type)},
+        )
+        return MealPlanEntryMutationResult.model_validate(resp.json())
 
 
 __all__ = [

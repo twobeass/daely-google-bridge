@@ -1,7 +1,7 @@
 # 02 – Auth-Flow
 
 ## TL;DR
-Auth läuft über **Keycloak** (Realm `daely`, Client `mobile-app`) mit dem **`password`-Grant (ROPC)** als unterstütztem Flow. Im laufenden App-Code wird ROPC tatsächlich für den Companion-Login verwendet (Username + Passwort werden direkt gegen `${OPENID_ENDPOINT}/token` getauscht). Refresh-Tokens werden über `dio`-`AuthTokenInterceptor` automatisch verwendet. Damit ist ein Python-Client mit Username/Passwort-Login praktikabel (keine Browser-Embed nötig).
+Auth läuft über **Keycloak** (Realm `daely`, Client `mobile-app`) mit dem **`password`-Grant (ROPC)** als unterstütztem Flow. Im laufenden App-Code wird ROPC tatsächlich für den Companion-Login verwendet (Username + Passwort werden direkt gegen `${OPENID_ENDPOINT}/token` getauscht). Refresh-Tokens werden über `dio`-`AuthTokenInterceptor` automatisch verwendet. Damit ist ein Python-Client mit Username/Passwort-Login praktikabel (keine Browser-Embed nötig). Die App sendet bei ROPC keinen expliziten `scope`-Parameter.
 
 ## Beweise
 
@@ -51,10 +51,13 @@ Vollständig vom User abgerufen am 2026-05-07:
    client_id=mobile-app
    username=<email>
    password=<password>
-   scope=openid profile email offline_access
    ```
-3. Antwort: JSON mit `access_token`, `refresh_token`, `expires_in`, `id_token`.
+3. Antwort: JSON mit `access_token`, `refresh_token`, `expires_in`, ggf. `id_token`.
 4. App speichert Tokens via `package:flutter_secure_storage` (sichtbar im Output: `flutter_secure_storage`-Package).
+
+**Live-Bestätigung 2026-09-04**: Der App-identische Vier-Felder-Request ohne
+expliziten `scope` wurde nach verdeckter Eingabe der Kontodaten mit HTTP 200
+akzeptiert. Tokenwerte und Kontodaten wurden nicht protokolliert oder archiviert.
 
 ### Bearer-Injection
 **Datei**: `findings/blutter_out/asm/common/interceptors/auth_token_interceptor.dart`
@@ -97,7 +100,7 @@ Vollständig vom User abgerufen am 2026-05-07:
 
 1. **ROPC ist bequem nutzbar**: `mobile-app` ist ein Public Client mit `password` als unterstütztem Grant. Ein Python-Client kann mit Username + Passwort direkt einen Bearer-Token holen. Kein Browser-Embed, kein Custom-Tab, kein Deep-Link nötig.
 
-2. **Refresh-Tokens haben offline_access**: `offline_access` ist als Scope unterstützt. Damit kann der Python-Client einen langlebigen Refresh-Token persistieren und über Tage/Wochen ohne erneutes Login-Prompt arbeiten.
+2. **Kein expliziter Login-Scope**: Die in der App enthaltene `oauth2`-Implementierung baut den ROPC-Body ausschließlich aus `grant_type`, `username`, `password` und `client_id`. Welche Scopes und Refresh-Token-Lebensdauer daraus resultieren, bestimmt die aktuelle Keycloak-Clientkonfiguration.
 
 3. **JWT-Validierung via JWKS**: Wenn wir Bearer-Tokens jemals verifizieren wollen (für Tests), liefert `…/protocol/openid-connect/certs` die Public Keys. Token-Inhalt: standard OIDC Claims (`sub`, `email`, `preferred_username` etc.).
 
@@ -108,7 +111,7 @@ Vollständig vom User abgerufen am 2026-05-07:
 ## Confidence
 **high**: Keycloak-Discovery (vom User direkt geholt), Client-ID `mobile-app`, OPENID_ENDPOINT, ROPC-Verfügbarkeit, Bearer-Header-Format, Refresh-Mechanik.
 
-**medium**: Konkretes Body-Format des `/token`-Calls (Standard-Annahme, sehr unwahrscheinlich, dass nicht).
+**high**: Konkretes Body-Format des `/token`-Calls; der Map-Aufbau in `oauth2/src/resource_owner_password_grant.dart` enthält exakt vier Felder und keinen `scope`.
 
 **low**: Tablet-Pairing-Auth-Flow (Device-Code-Flow vermutet, nicht verifiziert).
 
@@ -121,7 +124,7 @@ Vollständig vom User abgerufen am 2026-05-07:
    auf Device-Code-Flow (`device_authorization_endpoint` aus der Discovery)
    wäre der saubere Pfad.
 3. **`acr_values_supported: ["0", "1"]`**: Bedeutet, dass der Server „Authentication Context Class Reference" 0/1 unterstützt – kann für gestaffelte Auth-Levels relevant werden, aber Companion-App-Login ist üblicherweise acr=1.
-4. **Phase-3-Test**: Mit Test-Account `~/.daely-secrets/credentials.env` einen ROPC-Login als ersten Live-Call machen, dann Token in `~/.daely-secrets/` cachen. Vor dem Aufruf User-Freigabe einholen (CLAUDE.md-Regel).
+4. **Produktionsstatus**: ROPC ist mit dem App-identischen Request bestätigt. Die Bridge persistiert den rotierenden Refresh-Token in ihrem bestehenden SQLite-Store; keine Zugangsdaten werden in Findings oder Fixtures geschrieben.
 
 ## Vorschlag für Python-Client (Skizze)
 ```python
@@ -137,7 +140,6 @@ def login_password(email, password):
         "client_id": CLIENT_ID,
         "username": email,
         "password": password,
-        "scope": "openid profile email offline_access",
     })
     r.raise_for_status()
     return r.json()  # {access_token, refresh_token, expires_in, id_token, ...}

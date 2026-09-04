@@ -4,17 +4,18 @@
 
 | Phase | Status | Kommentar |
 |---|---|---|
-| 0 – APK-Inventur | ✅ | `00_OVERVIEW.md`. Flutter-Build (Dart 3.8.1 AOT) bestätigt – Stop-Kriterium aus CLAUDE.md getriggert, Plan angepasst. |
-| 0a – Format-Check | ✅ | XAPK aufgesplittet, base.apk + libs separiert. |
-| 1' – Flutter-Statik via blutter | ✅ | blutter erfolgreich gebaut (mit User-Space-Deps + ICU-Symlink-Workaround), 116 MB asm + 2.6 MB Object Pool extrahiert. `findings/blutter_out/`. |
-| 1 – API-Endpoints | ✅ | `01_ENDPOINTS.md`. 9 Service-Klassen, ~50 Endpoint-Pfade, Base-URL, Auth-Mechanik. |
+| 0 – APK-Inventur | ✅ | Älterer Flutter-Build (Dart 3.8.1 AOT) in `00_OVERVIEW.md`; zusätzlich offizielle Smartphone-App v1.5.2 signer-verifiziert und statisch analysiert. |
+| 0a – Format-Check | ✅ | XAPK lokal zerlegt; App nie auf dem realen Tablet installiert. |
+| 1' – Flutter-Statik via blutter | ✅ | Alter und neuer Build erfolgreich statisch ausgewertet. |
+| 1 – API-Endpoints | ✅ | `01_ENDPOINTS.md`; aktuelle v2-Checklisten, Meal-Plan-Einträge, Rezepte, Grocery und Kundenkarten aus Smartphone v1.5.2 ergänzt. |
 | 2 – Foto-Limit | ⚠️ teilweise | `03_PHOTO_LIMIT.md`. Statisch: `maxImages` ist Server-Feld, kein Client-Hardcode. Server-Enforcement-Status nur per Live-Test klärbar. |
 | 2 – Calendar-Sync | ⚠️ teilweise | `04_CALENDAR_SYNC.md`. Drei Sync-Sourcen, `SyncTokenPair`-Mechanik, `writable`-Feld auf URL-Calendars. Tatsächliches Hersteller-Limit nicht ersichtlich. |
-| 2 – Cert-Pinning | ✅ | Negativ. Default-TLS, kein Pinning – relevant für ggf. spätere Phase 5. |
-| Auth-Flow | ✅ | `02_AUTH.md`. Keycloak Realm `daely`, Client `mobile-app`, ROPC supported, `offline_access` möglich. Discovery vom User direkt geholt. |
-| 3 – Test-Client | ⏸ | Skelett in `02_AUTH.md` enthalten, **nicht ausgeführt** (CLAUDE.md-Regel). Erste Live-Calls brauchen User-Freigabe. |
-| 4 – Hypothesen-Verifikation | ⏸ | Nicht begonnen. Konkrete Test-Listen in `03/04_*.md`. |
-| 5 – Live-Capture | ⏸ | Nicht nötig auf aktuellem Stand. Kein Cert-Pinning erkannt → falls jemals nötig, einfach realisierbar. |
+| 2 – Cert-Pinning | ✅ | Negativ. Default-TLS, kein Pinning. |
+| List/Meal-API | ✅ Rezept v2 live, übrige v2-Bereiche offline | Legacy-Reads, v2-Rezeptdetail und v2-Rezept-DELETE erfolgreich; Testrezept bereinigt. Aktuelle v2-Checklisten, Meal-Plan, Grocery und Kundenkarten statisch rekonstruiert und offline getestet. |
+| Auth-Flow | ✅ | ROPC-Login mit dem korrigierten Konto erfolgreich; Tokens sicher gespeichert. |
+| 3 – Test-Client | ✅ | Typisierter Client implementiert; Produktionszugriffe bleiben einzeln freigabepflichtig. |
+| 4 – Hypothesen-Verifikation | ▶ | Rezeptdetail und gezielter Rezept-DELETE bestätigt; weitere Schreibtests und Grocery-Live-Read bleiben separat freigabepflichtig. |
+| 5 – Live-Capture | ⏸ | Für die aktuelle Mission nicht nötig, da Smartphone-v1.5.2-Verträge statisch rekonstruiert sind. |
 
 ## Was statisch nicht beantwortbar ist
 
@@ -36,11 +37,15 @@
 **Status**: Code-Pfad existiert (DioMixin::put-Aufrufe), aber wahrscheinlich vom Server abgelehnt (sonst wäre der ganze Limit-Mechanismus sinnlos).
 **Test**: 1 `PUT`-Call, sehen ob 200 oder 4xx.
 
-### D. HTTP-Methoden / Body-Schemas für Group/List/Chore/Meal-Plan-Endpoints
-**Frage**: Vollständige Method-Mapping pro Endpoint?
-**Status**: Sample-weise verifiziert, nicht erschöpfend.
-**Aufwand**: 1-2h tiefere blutter-Asm-Analyse pro Service ODER durch Live-Capture in 5 Min komplett.
-**Mission-Relevanz**: Nur indirekt – Nicht nötig für Foto-/Calendar-Workaround. Wird aber für einen vollständigen Python-Client gebraucht.
+### D. HTTP-Methoden / Body-Schemas für Group/Chore-Endpoints
+**Frage**: Vollständiges Methoden-Mapping pro verbleibendem Endpoint?
+**Status**: Legacy List/Meal Plan sowie aktuelle v2 Checklists, Meal Plan,
+Meals, Grocery und Loyalty Cards sind statisch rekonstruiert, im Python-Client
+implementiert und offline getestet (`11_LIST_MEAL_API.md`). Die Smartphone-
+v2-Basis für Chore und Sync ist belegt; deren vollständige Methoden und
+Body-Schemata sowie Group bleiben nur teilweise analysiert.
+**Mission-Relevanz**: Die angefragten Listen-, Rezept- und Einkaufsfunktionen
+sind auf Client-Ebene abgedeckt; Produktions-Verifikation bleibt getrennt.
 
 ### E. Einzelwerte der Enum-Typen
 **Frage**: Was sind die konkreten Werte von `ShareType`, `UpdateCalendarEventType`, `AccountType`, `CalendarPresentationType`?
@@ -48,15 +53,15 @@
 **Aufwand**: 30 Min für jeden, oder 5 Min via Live-API-Sample.
 
 ### F. Pagination
-**Frage**: Werden `?page=`, `?cursor=`, `?since=` o. ä. Query-Params irgendwo verwendet?
-**Status**: Bisher nicht in Strings aufgetaucht. Wahrscheinlich nicht implementiert (junges Backend, Familien-Daten sind klein).
-**Test**: Erstmals beim Live-Call Schauen, ob Response Pagination-Cursor enthält.
+**Status**: Für v2-Rezepte bestätigt: `page`, `pageSize`,
+`mealsPage`, `mealsPageSize` sowie ein Wrapper mit `items`, `page`,
+`pageSize` und `totalCount`. Für andere Ressourcen weiterhin separat zu
+prüfen.
 
 ### G. SSE/WebSocket
-**Strings-Treffer**: `package:sse_channel/io.dart`, `package:web_socket_channel/...`, `common/service/realtime/...`. Backend hat Realtime-Push-Mechanismus.
-**Frage**: Welcher Endpoint? Welches Auth?
-**Status**: Nicht analysiert.
-**Mission-Relevanz**: Niedrig – Polling reicht für Mission.
+**Status**: Kalender-Realtime ist analysiert und in der Bridge standardmäßig
+aktiviert. Offen bleiben nur mögliche zusätzliche Topics für Meals/Grocery; sie
+sind für explizite REST-Zugriffe nicht erforderlich.
 
 ## Beobachtete Sicherheits-/Privacy-Aspekte
 
@@ -72,14 +77,8 @@ Falls beim Live-Test der Backend-Server mit auffälligem Verhalten reagiert (z. 
 
 ## Vorschlag für nächste Iteration
 
-**Empfehlung**: Mission-orientiert in 3 Schritten weitermachen:
+1. Optional separat freigegebene und sanitisierte v2-Overview-Reads für
+   Checklisten, Meal Plan oder Grocery ausführen.
+2. Weitere Produktionsmutationen jeweils einzeln freigeben und prüfen.
 
-1. **Kleinster sinnvoller Live-Test (Phase 3-Start)**: Nur ROPC-Login → `GET /api/users/me` → Token persisten. Klärt, ob ROPC tatsächlich gehen, welcher Token wie lange gültig ist, ob das User-Modell wie vermutet aussieht. **1 Live-Call**.
-
-2. **Status-Quo-Reads (Phase 3)**: `GET /api/groups`, `GET /api/url-calendars`, `GET /api/external-accounts`, `GET /api/gallery/groups/<gid>/overview` mit echten Daten des User-Accounts. Keine Schreib-Ops. Klärt aktuelles Setup. **4 Live-Calls**.
-
-3. **Kontrollierte Schreib-Probe (Phase 4)**: Je nach Phase-3-Ergebnis ein einzelner zielgerichteter POST/PUT/DELETE pro offene Frage (A, B, C oben). **Pro Frage 1 Call.**
-
-Vor jedem Schritt User-Freigabe einholen.
-
-Falls der User stattdessen direkt zu **Phase 5 (mitmproxy)** will, ist das jetzt deutlich einfacher als ursprünglich gedacht: kein Cert-Pinning, kein App-Attestation – ein gerooteter Emulator + System-CA-Push reicht. Trotzdem 4-6h Setup, daher nicht der Default.
+Ein Live-Capture oder eine modifizierte APK ist dafür nicht nötig.

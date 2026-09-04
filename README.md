@@ -262,6 +262,7 @@ docker compose exec bridge bridge <command> [args]
 | Command                                    | Was es macht                                                                                              |
 |--------------------------------------------|-----------------------------------------------------------------------------------------------------------|
 | `bridge bootstrap`                         | Einmal-Setup: Daely-Login, Google-OAuth, anlegen der Sub-Kalender pro Profil. Schreibt in `config.yaml`.  |
+| `bridge login-daely`                       | Erneuert nur die Daely-Anmeldung per verdeckter Passwortabfrage. Keine Daely-Datenabfrage, kein Google-Zugriff. |
 | `bridge run`                               | Daemon-Modus — initialer Full-Sync, dann Polling alle `poll_interval_minutes`. Wird vom Container-Entrypoint aufgerufen. |
 | `bridge run --once`                        | Genau ein Full-Sync, dann Exit. Praktisch für Cron oder Tests.                                            |
 | `bridge status`                            | Quick-Look: Tokens vorhanden? Wie viele Mappings? Letztes Sync-Timestamp?                                 |
@@ -269,6 +270,17 @@ docker compose exec bridge bridge <command> [args]
 | `bridge doctor --live`                     | Wie oben **plus** Live-Refresh des Daely-Tokens und Google-`list_calendars`-Ping. Braucht Netzwerk.       |
 | `bridge resync [--calendar <daely-cal-id>] [--dry-run]` | Setzt `last_seen_updated=NULL` auf den passenden Mappings, sodass der nächste Sync sie mit aktueller Mapper-Logik re-patcht. |
 | `bridge re-color [--dry-run]`              | Convenience-Alias für `bridge resync` ohne Calendar-Filter — discoverable Shortcut nach Color-Mapping-Änderungen. |
+
+Ist nur der Daely-Refresh-Token abgelaufen oder widerrufen, muss nicht der
+vollständige Bootstrap mit Google-OAuth erneut laufen. Im Deploy-Verzeichnis:
+
+```bash
+docker compose run --rm bridge login-daely
+```
+
+Das Passwort wird ohne Echo direkt im Terminal abgefragt. Der Befehl ersetzt nur
+den Daely-Token in `data/bridge.db`; bestehende Google-Tokens, Kalender und
+Mappings bleiben unverändert.
 
 **Beispiel — schauen, ob alles passt:**
 

@@ -31,6 +31,10 @@ tests/fixtures_private/*
 apk/
 decompiled/
 findings/blutter_out/
+*.apk
+*.xapk
+*.apks
+*.aab
 
 # Internal RE-mission file — local notes only, not for the public repo
 CLAUDE.md

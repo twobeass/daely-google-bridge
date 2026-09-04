@@ -6,6 +6,7 @@ serve as response bodies.
 import json
 from datetime import date
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -18,7 +19,6 @@ from daely_google_bridge.daely_client import (
     DaelyAuthError,
     DaelyClient,
 )
-
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures_anonymized"
 
@@ -39,7 +39,7 @@ def client():
 
 @respx.mock
 def test_login_password_success(client):
-    respx.post(f"{DEFAULT_OIDC_BASE}/token").mock(
+    route = respx.post(f"{DEFAULT_OIDC_BASE}/token").mock(
         return_value=httpx.Response(200, json={
             "access_token": "AT-1",
             "refresh_token": "RT-1",
@@ -52,16 +52,41 @@ def test_login_password_success(client):
     assert data["access_token"] == "AT-1"
     assert client.access_token == "AT-1"
     assert client.refresh_token == "RT-1"
+    assert parse_qs(route.calls.last.request.content.decode()) == {
+        "grant_type": ["password"],
+        "client_id": ["mobile-app"],
+        "username": ["u@example.com"],
+        "password": ["secret"],
+    }
 
 
 @respx.mock
 def test_login_password_invalid_grant_raises(client):
     respx.post(f"{DEFAULT_OIDC_BASE}/token").mock(
-        return_value=httpx.Response(401, json={"error": "invalid_grant"})
+        return_value=httpx.Response(400, json={
+            "error": "invalid_grant",
+            "error_description": "Invalid user credentials",
+            "ignored": "must not be retained",
+        })
     )
     with pytest.raises(DaelyAuthError) as ei:
         client.login_password("u@example.com", "wrong")
     assert "invalid_grant" in str(ei.value)
+    assert "Invalid user credentials" in str(ei.value)
+    assert "ignored" not in str(ei.value)
+    assert ei.value.status_code == 400
+    assert ei.value.error == "invalid_grant"
+
+
+@respx.mock
+def test_login_password_non_json_error_does_not_echo_body(client):
+    respx.post(f"{DEFAULT_OIDC_BASE}/token").mock(
+        return_value=httpx.Response(503, text="internal diagnostic detail")
+    )
+    with pytest.raises(DaelyAuthError) as ei:
+        client.login_password("u@example.com", "wrong")
+    assert "status=503" in str(ei.value)
+    assert "internal diagnostic detail" not in str(ei.value)
 
 
 @respx.mock

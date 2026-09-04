@@ -2,6 +2,7 @@
 
 Subcommands:
     bridge bootstrap                  Interactive setup: Daely login, Google OAuth, sub-calendars.
+    bridge login-daely                Renew only the stored Daely login.
     bridge run [--once]               Run the sync loop.
     bridge status                     Show what the Store knows about state.
     bridge doctor [--live]            Run a series of health checks; optional live ping.
@@ -260,6 +261,62 @@ def cmd_bootstrap(
     daely.close()
     store.close()
     return 0
+
+
+def cmd_login_daely(
+    args: argparse.Namespace,
+    *,
+    daely_factory: Callable[[], DaelyClient] | None = None,
+    input_fn: Callable[[str], str] = input,
+    getpass_fn: Callable[[str], str] = getpass.getpass,
+) -> int:
+    """Renew only the stored Daely tokens without touching domain data or Google."""
+    config_path = Path(args.config or DEFAULT_CONFIG_PATH)
+    if not config_path.exists():
+        print(f"No config at {config_path}. Run `bridge bootstrap` first.", file=sys.stderr)
+        return 1
+
+    cfg = load_config(config_path)
+    _setup_logging(cfg.log_level, cfg.log_format)
+    store = Store(cfg.db_path)
+    daely = (daely_factory or DaelyClient)()
+    daely.min_pause_seconds = cfg.daely_min_pause_seconds
+
+    try:
+        if cfg.daely_email == "you@example.com":
+            email = input_fn("Daely email: ").strip()
+            if not email:
+                print("Daely email must not be empty.", file=sys.stderr)
+                return 4
+        else:
+            email = cfg.daely_email
+        password = getpass_fn("Daely password (input hidden): ")
+        try:
+            daely.login_password(email, password)
+        except DaelyAuthError as exc:
+            print(
+                f"Daely login failed ({exc}); stored tokens were not changed.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if not daely.refresh_token:
+            print(
+                "Daely login returned no refresh token; stored tokens were not changed.",
+                file=sys.stderr,
+            )
+            return 3
+
+        store.put_token(
+            provider=DAELY_TOKEN_PROVIDER,
+            refresh_token=daely.refresh_token,
+            access_token=daely.access_token,
+        )
+        print("Daely login OK; stored tokens updated. No Daely data was requested.")
+        return 0
+    finally:
+        daely.close()
+        store.close()
 
 
 def _build_daely_client(store: Store, cfg: BridgeConfig) -> DaelyClient:
@@ -970,6 +1027,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("bootstrap", help="interactive setup")
 
+    sub.add_parser(
+        "login-daely",
+        help="renew only the stored Daely login (no domain-data or Google calls)",
+    )
+
     p_run = sub.add_parser("run", help="run the sync loop (Phase 3d)")
     p_run.add_argument("--once", action="store_true", help="single pass, then exit")
 
@@ -1015,6 +1077,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {
     "bootstrap": cmd_bootstrap,
+    "login-daely": cmd_login_daely,
     "run": cmd_run,
     "status": cmd_status,
     "doctor": cmd_doctor,
@@ -1030,6 +1093,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
-    "cmd_bootstrap", "cmd_doctor", "cmd_recolor", "cmd_resync",
-    "cmd_run", "cmd_status", "main",
+    "cmd_bootstrap", "cmd_doctor", "cmd_login_daely", "cmd_recolor",
+    "cmd_resync", "cmd_run", "cmd_status", "main",
 ]

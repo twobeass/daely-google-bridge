@@ -8,14 +8,15 @@ import yaml
 
 from daely_google_bridge.cli import (
     cmd_bootstrap,
+    cmd_login_daely,
     cmd_resync,
     cmd_run,
     cmd_status,
     main,
 )
 from daely_google_bridge.config import BridgeConfig, save_config
+from daely_google_bridge.daely_client import DaelyAuthError
 from daely_google_bridge.store import Store
-
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures_anonymized"
 
@@ -43,6 +44,106 @@ def test_run_without_config_returns_1(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "bootstrap" in err.lower()
+
+
+# ────────── Daely-only login ──────────
+
+def _login_daely_setup(tmp_path):
+    cfg = BridgeConfig(
+        daely_email="account@example.test",
+        google_oauth_client_secrets_file=tmp_path / "unused-google.json",
+        db_path=tmp_path / "bridge.db",
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+    args = MagicMock(config=str(config_path))
+    return args, cfg
+
+
+def test_login_daely_updates_only_daely_tokens(tmp_path, capsys):
+    args, cfg = _login_daely_setup(tmp_path)
+    daely = MagicMock()
+    daely.access_token = "new-access"
+    daely.refresh_token = "new-refresh"
+    getpass_fn = MagicMock(return_value="test-password")
+
+    rc = cmd_login_daely(
+        args,
+        daely_factory=lambda: daely,
+        getpass_fn=getpass_fn,
+    )
+
+    assert rc == 0
+    daely.login_password.assert_called_once_with(cfg.daely_email, "test-password")
+    daely.get_my_groups.assert_not_called()
+    getpass_fn.assert_called_once()
+    daely.close.assert_called_once()
+    with Store(cfg.db_path) as store:
+        token = store.get_token("daely")
+        assert token.access_token == "new-access"
+        assert token.refresh_token == "new-refresh"
+        assert store.get_token("google") is None
+    assert "No Daely data was requested" in capsys.readouterr().out
+
+
+def test_login_daely_failure_keeps_existing_token(tmp_path, capsys):
+    args, cfg = _login_daely_setup(tmp_path)
+    with Store(cfg.db_path) as store:
+        store.put_token(
+            provider="daely",
+            access_token="old-access",
+            refresh_token="old-refresh",
+        )
+    daely = MagicMock()
+    daely.login_password.side_effect = DaelyAuthError(
+        "ROPC failed",
+        status_code=400,
+        error="invalid_grant",
+        error_description="Invalid user credentials",
+    )
+
+    rc = cmd_login_daely(
+        args,
+        daely_factory=lambda: daely,
+        getpass_fn=lambda _prompt: "wrong-password",
+    )
+
+    assert rc == 2
+    with Store(cfg.db_path) as store:
+        token = store.get_token("daely")
+        assert token.access_token == "old-access"
+        assert token.refresh_token == "old-refresh"
+    err = capsys.readouterr().err
+    assert "invalid_grant" in err
+    assert "Invalid user credentials" in err
+    assert "not changed" in err
+
+
+def test_login_daely_prompts_for_email_when_config_has_placeholder(tmp_path):
+    cfg = BridgeConfig(
+        daely_email="you@example.com",
+        google_oauth_client_secrets_file=tmp_path / "unused-google.json",
+        db_path=tmp_path / "bridge.db",
+    )
+    config_path = tmp_path / "config.yaml"
+    save_config(cfg, config_path, backup=False)
+    args = MagicMock(config=str(config_path))
+    daely = MagicMock(access_token="new-access", refresh_token="new-refresh")
+    input_fn = MagicMock(return_value="actual-account@example.test")
+
+    rc = cmd_login_daely(
+        args,
+        daely_factory=lambda: daely,
+        input_fn=input_fn,
+        getpass_fn=lambda _prompt: "test-password",
+    )
+
+    assert rc == 0
+    input_fn.assert_called_once_with("Daely email: ")
+    daely.login_password.assert_called_once_with(
+        "actual-account@example.test",
+        "test-password",
+    )
 
 
 def test_run_once_dispatches_full_sync(tmp_path, capsys):
